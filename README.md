@@ -1,2 +1,3 @@
 # hookso
-一个替换其他运行中的进程的.so函数的工具.A tool to replace the .so function of other running processes
+hookso是一个工具，用来把其他正在运行中的进程的某个.so的某个函数，替换成另一个.so的某个函数，实现一些比如监控、优化的目的。
+
