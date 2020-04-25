@@ -226,7 +226,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
             break;
         }
 
-        std::vector<std::string> tmp;
+        std::vector <std::string> tmp;
 
         const char *sep = "\t \r\n";
         char *line = NULL;
@@ -467,6 +467,5 @@ int main(int argc, char **argv) {
     }
 
     printf("%s old %s %p offset %lu\n", argv[2], argv[3], old_funcaddr, old_funcaddr_plt_offset);
-
     return 0;
 }
