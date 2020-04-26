@@ -159,7 +159,7 @@ int remote_process_read(pid_t remote_pid, void *address, void *buffer, size_t le
     if (ret == 0) {
         return ret;
     }
-    ERR("hookso: remote_process_read fail %p %d %s", address, ret, strerror(ret));
+    ERR("remote_process_read fail %p %d %s", address, ret, strerror(ret));
     return ret;
 }
 
@@ -255,7 +255,7 @@ int remote_process_write(pid_t remote_pid, void *address, void *buffer, size_t l
     if (ret == 0) {
         return ret;
     }
-    ERR("hookso: remote_process_read fail %p %d %s", address, ret, strerror(ret));
+    ERR("remote_process_read fail %p %d %s", address, ret, strerror(ret));
     return ret;
 }
 
@@ -267,7 +267,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     sprintf(maps_path, "/proc/%d/maps", pid);
     FILE *fd = fopen(maps_path, "r");
     if (!fd) {
-        ERR("hookso: cannot open the memory maps, %s", strerror(errno));
+        ERR("cannot open the memory maps, %s", strerror(errno));
         return -1;
     }
 
@@ -311,7 +311,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
             pos = sobeginstr.find_last_of("-");
             if (pos == -1) {
                 fclose(fd);
-                ERR("hookso: parse /proc/%d/maps %s fail", pid, soname.c_str());
+                ERR("parse /proc/%d/maps %s fail", pid, soname.c_str());
                 return -1;
             }
             sobeginstr = sobeginstr.substr(0, pos);
@@ -322,7 +322,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     fclose(fd);
 
     if (sobeginstr.empty()) {
-        ERR("hookso: find /proc/%d/maps %s fail", pid, soname.c_str());
+        ERR("find /proc/%d/maps %s fail", pid, soname.c_str());
         return -1;
     }
 
@@ -340,7 +340,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
         targetso.e_ident[EI_MAG1] != ELFMAG1 ||
         targetso.e_ident[EI_MAG2] != ELFMAG2 ||
         targetso.e_ident[EI_MAG3] != ELFMAG3) {
-        ERR("hookso: not valid elf header /proc/%d/maps %lu ", pid, sobeginvalue);
+        ERR("not valid elf header /proc/%d/maps %lu ", pid, sobeginvalue);
         return -1;
     }
 
@@ -388,19 +388,19 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (pltindex < 0) {
-        ERR("hookso: not find .plt %s", soname.c_str());
+        ERR("not find .plt %s", soname.c_str());
         return -1;
     }
     if (dynsymindex < 0) {
-        ERR("hookso: not find .dynsym %s", soname.c_str());
+        ERR("not find .dynsym %s", soname.c_str());
         return -1;
     }
     if (dynstrindex < 0) {
-        ERR("hookso: not find .dynstr %s", soname.c_str());
+        ERR("not find .dynstr %s", soname.c_str());
         return -1;
     }
     if (relapltindex < 0) {
-        ERR("hookso: not find .rel.plt %s", soname.c_str());
+        ERR("not find .rel.plt %s", soname.c_str());
         return -1;
     }
 
@@ -442,7 +442,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (symfuncindex < 0) {
-        ERR("hookso: not find %s in .dynsym %s", funcname.c_str(), soname.c_str());
+        ERR("not find %s in .dynsym %s", funcname.c_str(), soname.c_str());
         return -1;
     }
 
@@ -480,7 +480,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (relafuncindex < 0) {
-        ERR("hookso: not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
+        ERR("not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
         return -1;
     }
 
@@ -508,7 +508,7 @@ int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
     sprintf(maps_path, "/proc/%d/maps", pid);
     FILE *fd = fopen(maps_path, "r");
     if (!fd) {
-        ERR("hookso: cannot open the memory maps, %s", strerror(errno));
+        ERR("cannot open the memory maps, %s", strerror(errno));
         return -1;
     }
 
@@ -556,7 +556,7 @@ int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
             sobeginstr = tmp[0];
             pos = sobeginstr.find_last_of("-");
             if (pos == -1) {
-                ERR("hookso: parse /proc/%d/maps fail", pid);
+                ERR("parse /proc/%d/maps fail", pid);
                 fclose(fd);
                 return -1;
             }
@@ -568,7 +568,7 @@ int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
     fclose(fd);
 
     if (name.empty()) {
-        ERR("hookso: not find libc name in /proc/%d/maps", pid);
+        ERR("not find libc name in /proc/%d/maps", pid);
         return -1;
     }
 
@@ -579,7 +579,7 @@ int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
 }
 
 std::string glibcname = "";
-char *gplibcaddr = 0;
+char *gpcalladdr = 0;
 uint64_t gbackupcode = 0;
 
 const int syscall_sys_mmap = 9;
@@ -591,10 +591,10 @@ syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, u
            uint64_t arg4 = 0,
            uint64_t arg5 = 0, uint64_t arg6 = 0) {
 
-    struct user_regs_struct regs;
-    int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
+    struct user_regs_struct oldregs;
+    int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
     if (ret < 0) {
-        ERR("hookso: ptrace %d PTRACE_GETREGS fail", pid);
+        ERR("ptrace %d PTRACE_GETREGS fail", pid);
         return -1;
     }
 
@@ -608,7 +608,8 @@ syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, u
     memset(&code[3], 0x90, sizeof(code) - 3);
 
     // setup registers
-    regs.rip = (uint64_t) gplibcaddr;
+    struct user_regs_struct regs = oldregs;
+    regs.rip = (uint64_t) gpcalladdr;
     regs.rax = syscallno;
     regs.rdi = arg1;
     regs.rsi = arg2;
@@ -617,20 +618,92 @@ syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, u
     regs.r8 = arg5;
     regs.r9 = arg6;
 
+    ret = remote_process_write(pid, gpcalladdr, code, sizeof(code));
+    if (ret < 0) {
+        return -1;
+    }
+
     ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
     if (ret < 0) {
-        ERR("hookso: ptrace %d PTRACE_SETREGS fail", pid);
+        ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        return -1;
+    }
+
+    ret = ptrace(PTRACE_CONT, pid, 0, 0);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_CONT fail", pid);
+        return -1;
+    }
+
+    int errsv = 0;
+    int status = 0;
+    while (1) {
+        ret = waitpid(pid, &status, 0);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ERR("waitpid error: %d %s", errno, strerror(errno));
+            errsv = errno;
+            break;
+        }
+
+        if (WIFSTOPPED(status)) {
+            if (WSTOPSIG(status) == SIGTRAP) {
+                // ok
+                break;
+            } else {
+                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
+                errsv = -1;
+                break;
+            }
+        } else if (WIFEXITED(status)) {
+            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
+            errsv = -1;
+            break;
+        } else if (WIFSIGNALED(status)) {
+            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
+            errsv = -1;
+            break;
+        } else {
+            ERR("unexpected waitpid status: 0x%x", status);
+            errsv = -1;
+            break;
+        }
+    }
+
+    if (!errsv) {
+        int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            return -1;
+        }
+        retval = regs.rax;
+    } else {
+        retval = -1;
+    }
+
+    ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        return -1;
+    }
+
+    ret = remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
+    if (ret < 0) {
         return -1;
     }
 
     return 0;
 }
 
-int alloc_so_string_mem(pid_t pid, std::string str, void *straddr) {
+int alloc_so_string_mem(pid_t pid, std::string str, void *&targetaddr, int &targetlen) {
 
     int slen = str.length() + 1;
     int pagesize = sysconf(_SC_PAGESIZE);
-    int len = (slen + pagesize - 1) / pagesize;
+    int len = ((slen + pagesize - 1) / pagesize) * pagesize;
+
+    LOG("start syscall sys_mmap %d %d", str.length(), len);
 
     uint64_t retval = 0;
     int ret = syscall_so(pid, retval, syscall_sys_mmap, 0, len, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN,
@@ -638,11 +711,48 @@ int alloc_so_string_mem(pid_t pid, std::string str, void *straddr) {
     if (ret != 0) {
         return -1;
     }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    ret = remote_process_write(pid, (void *) retval, (void *) str.c_str(), str.length());
+    if (ret != 0) {
+        return -1;
+    }
+
+    targetaddr = (void *) retval;
+    targetlen = len;
+
+    LOG("syscall sys_mmap ok %d %d %p", str.length(), len, targetaddr);
+
+    return 0;
+}
+
+int free_so_string_mem(pid_t pid, void *targetaddr, int targetlen) {
+
+    LOG("start syscall sys_munmap %p %d", targetaddr, targetlen);
+
+    uint64_t retval = 0;
+    int ret = syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) targetaddr, (uint64_t) targetlen);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("syscall sys_munmap ok %p %d", targetaddr, targetlen);
 
     return 0;
 }
 
 int inject_so(pid_t pid, const std::string &sopath) {
+
+    char abspath[PATH_MAX];
+    if (realpath(sopath.c_str(), abspath) == NULL) {
+        ERR("failed to get the full path of %s : %s", sopath.c_str(), strerror(errno));
+        return -1;
+    }
 
     uint64_t libc_dlopen_mode_funcaddr_plt_offset = 0;
     void *libc_dlopen_mode_funcaddr = 0;
@@ -652,6 +762,18 @@ int inject_so(pid_t pid, const std::string &sopath) {
         return -1;
     }
     LOG("libc %s func __libc_dlopen_mode is %p", glibcname.c_str(), libc_dlopen_mode_funcaddr);
+
+    void *dlopen_straddr = 0;
+    int dlopen_strlen = 0;
+    ret = alloc_so_string_mem(pid, abspath, dlopen_straddr, dlopen_strlen);
+    if (ret != 0) {
+        return -1;
+    }
+
+    ret = free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
+    if (ret != 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -725,10 +847,10 @@ int ini_hookso_env(pid_t pid) {
     }
 
     glibcname = libcname;
-    gplibcaddr = (char *) ((uint64_t) plibcaddr + 8); // Elf64_Ehdr e_ident[8-16]
+    gpcalladdr = (char *) ((uint64_t) plibcaddr + 8); // Elf64_Ehdr e_ident[8-16]
     gbackupcode = code;
 
-    LOG("ini hookso env glibcname=%s gplibcaddr=%p backupcode=%lu", glibcname.c_str(), gplibcaddr, gbackupcode);
+    LOG("ini hookso env glibcname=%s gpcalladdr=%p backupcode=%lu", glibcname.c_str(), gpcalladdr, gbackupcode);
 
     return 0;
 }
@@ -746,13 +868,13 @@ int main(int argc, char **argv) {
 
     int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
     if (ret < 0) {
-        ERR("hookso: ptrace %d PTRACE_ATTACH fail", pid);
+        ERR("ptrace %d PTRACE_ATTACH fail", pid);
         return -1;
     }
 
     ret = waitpid(pid, NULL, 0);
     if (ret < 0) {
-        ERR("hookso: ptrace %d waitpid fail", pid);
+        ERR("ptrace %d waitpid fail", pid);
         return -1;
     }
 
@@ -770,7 +892,7 @@ int main(int argc, char **argv) {
 
     ret = ptrace(PTRACE_DETACH, pid, 0, 0);
     if (ret < 0) {
-        ERR("hookso: ptrace %d PTRACE_DETACH fail", pid);
+        ERR("ptrace %d PTRACE_DETACH fail", pid);
         return -1;
     }
 
