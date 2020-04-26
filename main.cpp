@@ -38,26 +38,14 @@
 
 #define PROCMAPS_LINE_MAX_LENGTH (PATH_MAX + 100)
 
-#define DEBUG_LOG 1
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+#define LOG(...) log(stdout, "[DEBUG]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define ERR(...) log(stderr, "[ERROR]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#ifdef DEBUG_LOG
-#define LOG(...) log("[DEBUG] ", __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define ERR(...) log("[ERROR] ", __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#else
-#define LOG(...)
-#define ERR(...)
-#endif
-
-void log(const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
-    FILE *pLog = NULL;
+void log(FILE *fd, const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
     time_t clock1;
     struct tm *tptr;
     va_list ap;
-
-    pLog = fopen("hookplt.log", "a+");
-    if (pLog == NULL) {
-        return;
-    }
 
     clock1 = time(0);
     tptr = localtime(&clock1);
@@ -65,22 +53,15 @@ void log(const char *header, const char *file, const char *func, int pos, const 
     struct timeval tv;
     gettimeofday(&tv, NULL);
 
-    fprintf(pLog, "===========================[%d.%d.%d, %d.%d.%d %llu]%s:%d,%s:===========================\n%s",
-            tptr->tm_year + 1990, tptr->tm_mon + 1,
+    fprintf(fd, "%s[%d.%d.%d,%d:%d:%d,%llu]%s:%d,%s: ", header,
+            tptr->tm_year + 1900, tptr->tm_mon + 1,
             tptr->tm_mday, tptr->tm_hour, tptr->tm_min,
-            tptr->tm_sec, (long long) ((tv.tv_sec) * 1000 + (tv.tv_usec) / 1000), file, pos, func, header);
+            tptr->tm_sec, (long long) ((tv.tv_usec) / 1000) % 1000, file, pos, func);
 
     va_start(ap, fmt);
-    vfprintf(pLog, fmt, ap);
-    fprintf(pLog, "\n\n");
+    vfprintf(fd, fmt, ap);
+    fprintf(fd, "\n");
     va_end(ap);
-
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    printf("\n\n");
-    va_end(ap);
-
-    fclose(pLog);
 }
 
 int remote_process_vm_readv(pid_t remote_pid, void *address, void *buffer, size_t len) {
@@ -203,7 +184,7 @@ int remote_process_read(pid_t remote_pid, void *address, void *buffer, size_t le
     if (ret == 0) {
         return ret;
     }
-    fprintf(stderr, "hookplt: remote_process_read fail %d %s\n", ret, strerror(ret));
+    ERR("hookplt: remote_process_read fail %d %s", ret, strerror(ret));
     return ret;
 }
 
@@ -215,7 +196,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     sprintf(maps_path, "/proc/%d/maps", pid);
     FILE *fd = fopen(maps_path, "r");
     if (!fd) {
-        fprintf(stderr, "hookplt: cannot open the memory maps, %s\n", strerror(errno));
+        ERR("hookplt: cannot open the memory maps, %s", strerror(errno));
         return -1;
     }
 
@@ -258,7 +239,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
             sobeginstr = tmp[0];
             pos = sobeginstr.find_last_of("-");
             if (pos == -1) {
-                fprintf(stderr, "hookplt: parse /proc/%d/maps %s fail\n", pid, soname.c_str());
+                ERR("hookplt: parse /proc/%d/maps %s fail", pid, soname.c_str());
                 return -1;
             }
             sobeginstr = sobeginstr.substr(0, pos);
@@ -269,13 +250,13 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     fclose(fd);
 
     if (sobeginstr.empty()) {
-        fprintf(stderr, "hookplt: find /proc/%d/maps %s fail\n", pid, soname.c_str());
+        ERR("hookplt: find /proc/%d/maps %s fail", pid, soname.c_str());
         return -1;
     }
 
     uint64_t sobeginvalue = std::strtoul(sobeginstr.c_str(), 0, 16);
 
-    printf("find target so, begin with 0x%s %lu\n", sobeginstr.c_str(), sobeginvalue);
+    LOG("find target so, begin with 0x%s %lu", sobeginstr.c_str(), sobeginvalue);
 
     Elf64_Ehdr targetso;
     int ret = remote_process_read(pid, (void *) sobeginvalue, &targetso, sizeof(targetso));
@@ -287,15 +268,15 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
         targetso.e_ident[EI_MAG1] != ELFMAG1 ||
         targetso.e_ident[EI_MAG2] != ELFMAG2 ||
         targetso.e_ident[EI_MAG3] != ELFMAG3) {
-        fprintf(stderr, "hookplt: not valid elf header /proc/%d/maps %lu \n", pid, sobeginvalue);
+        ERR("hookplt: not valid elf header /proc/%d/maps %lu ", pid, sobeginvalue);
         return -1;
     }
 
-    printf("read head ok %lu\n", sobeginvalue);
-    printf("section offset %lu\n", targetso.e_shoff);
-    printf("section num %d\n", targetso.e_shnum);
-    printf("section size %d\n", targetso.e_shentsize);
-    printf("section header string table index %d\n", targetso.e_shstrndx);
+    LOG("read head ok %lu", sobeginvalue);
+    LOG("section offset %lu", targetso.e_shoff);
+    LOG("section num %d", targetso.e_shnum);
+    LOG("section size %d", targetso.e_shentsize);
+    LOG("section header string table index %d", targetso.e_shstrndx);
 
     Elf64_Shdr setions[targetso.e_shnum];
     ret = remote_process_read(pid, (void *) (sobeginvalue + targetso.e_shoff), &setions, sizeof(setions));
@@ -304,8 +285,8 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     Elf64_Shdr &shsection = setions[targetso.e_shstrndx];
-    printf("section header string table offset %ld\n", shsection.sh_offset);
-    printf("section header string table size %ld\n", shsection.sh_size);
+    LOG("section header string table offset %ld", shsection.sh_offset);
+    LOG("section header string table size %ld", shsection.sh_size);
 
     char shsectionname[shsection.sh_size];
     ret = remote_process_read(pid, (void *) (sobeginvalue + shsection.sh_offset), shsectionname, sizeof(shsectionname));
@@ -335,31 +316,31 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (pltindex < 0) {
-        fprintf(stderr, "hookplt: not find .plt %s\n", soname.c_str());
+        ERR("hookplt: not find .plt %s", soname.c_str());
         return -1;
     }
     if (dynsymindex < 0) {
-        fprintf(stderr, "hookplt: not find .dynsym %s\n", soname.c_str());
+        ERR("hookplt: not find .dynsym %s", soname.c_str());
         return -1;
     }
     if (dynstrindex < 0) {
-        fprintf(stderr, "hookplt: not find .dynstr %s\n", soname.c_str());
+        ERR("hookplt: not find .dynstr %s", soname.c_str());
         return -1;
     }
     if (relapltindex < 0) {
-        fprintf(stderr, "hookplt: not find .rel.plt %s\n", soname.c_str());
+        ERR("hookplt: not find .rel.plt %s", soname.c_str());
         return -1;
     }
 
     Elf64_Shdr &pltsection = setions[pltindex];
-    printf("plt index %d\n", pltindex);
-    printf("plt section offset %ld\n", pltsection.sh_offset);
-    printf("plt section size %ld\n", pltsection.sh_size);
+    LOG("plt index %d", pltindex);
+    LOG("plt section offset %ld", pltsection.sh_offset);
+    LOG("plt section size %ld", pltsection.sh_size);
 
     Elf64_Shdr &dynsymsection = setions[dynsymindex];
-    printf("dynsym index %d\n", dynsymindex);
-    printf("dynsym section offset %ld\n", dynsymsection.sh_offset);
-    printf("dynsym section size %ld\n", dynsymsection.sh_size / sizeof(Elf64_Sym));
+    LOG("dynsym index %d", dynsymindex);
+    LOG("dynsym section offset %ld", dynsymsection.sh_offset);
+    LOG("dynsym section size %ld", dynsymsection.sh_size / sizeof(Elf64_Sym));
 
     Elf64_Sym sym[dynsymsection.sh_size / sizeof(Elf64_Sym)];
     ret = remote_process_read(pid, (void *) (sobeginvalue + dynsymsection.sh_offset), &sym, sizeof(sym));
@@ -368,9 +349,9 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     Elf64_Shdr &dynstrsection = setions[dynstrindex];
-    printf("dynstr index %d\n", dynstrindex);
-    printf("dynstr section offset %ld\n", dynstrsection.sh_offset);
-    printf("dynstr section size %ld\n", dynstrsection.sh_size);
+    LOG("dynstr index %d", dynstrindex);
+    LOG("dynstr section offset %ld", dynstrsection.sh_offset);
+    LOG("dynstr section size %ld", dynstrsection.sh_size);
 
     char dynstr[dynstrsection.sh_size];
     ret = remote_process_read(pid, (void *) (sobeginvalue + dynstrsection.sh_offset), dynstr, sizeof(dynstr));
@@ -389,7 +370,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (symfuncindex < 0) {
-        fprintf(stderr, "hookplt: not find %s in .dynsym %s\n", funcname.c_str(), soname.c_str());
+        ERR("hookplt: not find %s in .dynsym %s", funcname.c_str(), soname.c_str());
         return -1;
     }
 
@@ -399,7 +380,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
         std::string name = &shsectionname[s.sh_name];
         if (name == ".text") {
             void *func = (void *) (sobeginvalue + targetsym.st_value);
-            printf("target text func addr %p\n", func);
+            LOG("target text func addr %p", func);
             funcaddr_plt_offset = 0;
             funcaddr = func;
             return 0;
@@ -407,9 +388,9 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     Elf64_Shdr &relapltsection = setions[relapltindex];
-    printf("relaplt index %d\n", relapltindex);
-    printf("relaplt section offset %ld\n", relapltsection.sh_offset);
-    printf("relaplt section size %ld\n", relapltsection.sh_size / sizeof(Elf64_Rela));
+    LOG("relaplt index %d", relapltindex);
+    LOG("relaplt section offset %ld", relapltsection.sh_offset);
+    LOG("relaplt section size %ld", relapltsection.sh_size / sizeof(Elf64_Rela));
 
     Elf64_Rela rela[relapltsection.sh_size / sizeof(Elf64_Rela)];
     ret = remote_process_read(pid, (void *) (sobeginvalue + relapltsection.sh_offset), &rela, sizeof(rela));
@@ -427,13 +408,13 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     }
 
     if (relafuncindex < 0) {
-        fprintf(stderr, "hookplt: not find %s in .rela.plt %s\n", funcname.c_str(), soname.c_str());
+        ERR("hookplt: not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
         return -1;
     }
 
     Elf64_Rela &relafunc = rela[relafuncindex];
-    printf("target rela index %d\n", relafuncindex);
-    printf("target rela addr %ld\n", relafunc.r_offset);
+    LOG("target rela index %d", relafuncindex);
+    LOG("target rela addr %ld", relafunc.r_offset);
 
     void *func;
     ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
@@ -441,7 +422,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
         return -1;
     }
 
-    printf("target got.plt func old addr %p\n", func);
+    LOG("target got.plt func old addr %p", func);
 
     funcaddr_plt_offset = relafunc.r_offset;
     funcaddr = func;
@@ -449,7 +430,82 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     return 0;
 }
 
+std::string find_libc_name(pid_t pid) {
+
+    char maps_path[PATH_MAX];
+    sprintf(maps_path, "/proc/%d/maps", pid);
+    FILE *fd = fopen(maps_path, "r");
+    if (!fd) {
+        ERR("hookplt: cannot open the memory maps, %s", strerror(errno));
+        return "";
+    }
+//
+//    std::string sobeginstr;
+//    char buf[PROCMAPS_LINE_MAX_LENGTH];
+//    while (!feof(fd)) {
+//        if (fgets(buf, PROCMAPS_LINE_MAX_LENGTH, fd) == NULL) {
+//            break;
+//        }
+//
+//        std::vector <std::string> tmp;
+//
+//        const char *sep = "\t \r\n";
+//        char *line = NULL;
+//        for (char *token = strtok_r(buf, sep, &line); token != NULL; token = strtok_r(NULL, sep, &line)) {
+//            tmp.push_back(token);
+//        }
+//
+//        if (tmp.empty()) {
+//            continue;
+//        }
+//
+//        std::string path = tmp[tmp.size() - 1];
+//        if (path == "(deleted)") {
+//            if (tmp.size() < 2) {
+//                continue;
+//            }
+//            path = tmp[tmp.size() - 2];
+//        }
+//
+//        int pos = path.find_last_of("/");
+//        if (pos == -1) {
+//            continue;
+//        }
+//        std::string targetso = path.substr(pos + 1);
+//        targetso.erase(std::find_if(targetso.rbegin(), targetso.rend(), [](int ch) {
+//            return !std::isspace(ch);
+//        }).base(), targetso.end());
+//        if (targetso == soname) {
+//            sobeginstr = tmp[0];
+//            pos = sobeginstr.find_last_of("-");
+//            if (pos == -1) {
+//                ERR("hookplt: parse /proc/%d/maps %s fail",pid, soname.c_str());
+//                return -1;
+//            }
+//            sobeginstr = sobeginstr.substr(0, pos);
+//            break;
+//        }
+//    }
+
+    fclose(fd);
+
+    return "";
+}
+
 int inject_so(pid_t pid, const std::string &sopath) {
+
+    int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
+    if (ret < 0) {
+        ERR("hookplt: inject_so fail %d %s ptrace PTRACE_ATTACH", pid, sopath.c_str());
+        return -1;
+    }
+
+    ret = waitpid(pid, NULL, 0);
+    if (ret < 0) {
+        ERR("hookplt: inject_so fail %d %s waitpid ATTACH", pid, sopath.c_str());
+        ptrace(PTRACE_DETACH, pid, 0, 0);
+        return -1;
+    }
 
     return 0;
 }
@@ -460,16 +516,15 @@ int usage() {
            "\n"
            "eg:\n"
            "\n"
-           "./hookso replace pid src.so srcfunc target.so target.func\n"
+           "./hookso replace pid src-so srcfunc target-so-path target-func\n"
     );
-    return 1;
+    return -1;
 }
 
 int replace(int argc, char **argv) {
 
     if (argc < 6) {
-        usage();
-        return 1;
+        return usage();
     }
 
     std::string pidstr = argv[2];
@@ -478,13 +533,13 @@ int replace(int argc, char **argv) {
     std::string targetso = argv[5];
     std::string targetfunc = argv[6];
 
-    printf("pid=%s\n", pidstr.c_str());
-    printf("src so=%s\n", srcso.c_str());
-    printf("src function=%s\n", srcfunc.c_str());
-    printf("target so=%s\n", targetso.c_str());
-    printf("target function=%s\n", targetfunc.c_str());
+    LOG("pid=%s", pidstr.c_str());
+    LOG("src so=%s", srcso.c_str());
+    LOG("src function=%s", srcfunc.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
 
-    printf("start parse so file %s %s\n", srcso.c_str(), srcfunc.c_str());
+    LOG("start parse so file %s %s", srcso.c_str(), srcfunc.c_str());
 
     int pid = atoi(pidstr.c_str());
 
@@ -492,10 +547,17 @@ int replace(int argc, char **argv) {
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt_offset, old_funcaddr);
     if (ret != 0) {
-        return 1;
+        return -1;
     }
 
-    printf("%s old %s %p offset %lu\n", srcso.c_str(), srcfunc.c_str(), old_funcaddr, old_funcaddr_plt_offset);
+    LOG("%s old %s %p offset %lu", srcso.c_str(), srcfunc.c_str(), old_funcaddr, old_funcaddr_plt_offset);
+
+    LOG("start inject so file %s", targetso.c_str());
+
+    ret = inject_so(pid, targetso);
+    if (ret != 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -503,8 +565,7 @@ int replace(int argc, char **argv) {
 int main(int argc, char **argv) {
 
     if (argc < 2) {
-        usage();
-        return 1;
+        return usage();
     }
 
     std::string type = argv[1];
