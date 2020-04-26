@@ -95,5 +95,18 @@ libtest 12717
 可以看到已经没用libtestnew.so了
 
 * 示例5：让test加载libtestnew.so，执行libtestnew，然后卸载libtestnew.so
+```
+# ./hookso dlcall 11234 ./test/libtestnew.so libtestnew i=1234
+```
+然后观察test的输出，可以看到libtestnew.so的libtestnew函数输出
+```
+libtest 151
+libtest 152
+libtest 153
+libtestnew 1234
+libtest 154
+libtest 155
+```
 
+* 示例6：让test加载libtestnew.so，并把libtest.so的puts函数，跳转到libtestnew的putsnew
 
