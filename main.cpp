@@ -864,7 +864,7 @@ int free_so_string_mem(int pid, void *targetaddr, int targetlen) {
     return 0;
 }
 
-int inject_so(int pid, const std::string &sopath) {
+int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
 
     char abspath[PATH_MAX];
     if (realpath(sopath.c_str(), abspath) == NULL) {
@@ -903,6 +903,9 @@ int inject_so(int pid, const std::string &sopath) {
         return -1;
     }
 
+    LOG("inject so %s ok handle=%lu", abspath, retval);
+    handle = retval;
+
     return 0;
 }
 
@@ -918,8 +921,10 @@ int usage() {
            "./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
            "dlopen .so: \n"
            "./hookso dlopen pid target-so-path \n"
-           "do syscall: \n"
-           "./hookso replace pid src-so src-func target-so-path target-func \n"
+           "dlclose .so: \n"
+           "./hookso dlclose pid handle \n"
+           "open .so and call function and close: \n"
+           "./hookso dlcall pid target-so-path target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
     );
     return -1;
 }
@@ -954,6 +959,46 @@ int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
     return -1;
 }
 
+int program_dlclose(int argc, char **argv) {
+
+    if (argc < 4) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string handlestr = argv[3];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", handlestr.c_str());
+
+    LOG("start remove so file %s", handlestr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    uint64_t handle = atol(handlestr.c_str());
+
+    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
+    void *libc_dlclose_funcaddr = 0;
+    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
+                                libc_dlclose_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("remove so file %lu ok", handle);
+
+    return 0;
+}
+
 int program_dlopen(int argc, char **argv) {
 
     if (argc < 4) {
@@ -970,12 +1015,101 @@ int program_dlopen(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    int ret = inject_so(pid, targetso);
+    uint64_t handle = 0;
+    int ret = inject_so(pid, targetso, handle);
     if (ret != 0) {
         return -1;
     }
 
     LOG("inject so file %s ok", targetso.c_str());
+
+    return 0;
+}
+
+int program_dlcall(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t arg[6] = {0};
+    for (int i = 5; i < argc; ++i) {
+        std::string argstr = argv[i];
+        int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
+        if (ret != 0) {
+            return -1;
+        }
+        LOG("parse %d arg %d", i - 4, arg[i - 5]);
+    }
+
+    LOG("start inject so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    uint64_t handle = 0;
+    int ret = inject_so(pid, targetso, handle);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    int pos = targetso.find_last_of("/");
+    if (pos == -1) {
+        ERR("target so invalid %s", targetso.c_str());
+        return -1;
+    }
+    std::string soname = targetso.substr(pos + 1);
+    soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
+        return !std::isspace(ch);
+    }).base(), soname.end());
+
+    uint64_t target_funcaddr_plt_offset = 0;
+    void *target_funcaddr = 0;
+    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), target_funcaddr_plt_offset, target_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("start call so file %s %s", soname.c_str(), targetfunc.c_str());
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("start close so file %s %s", soname.c_str(), targetfunc.c_str());
+
+    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
+    void *libc_dlclose_funcaddr = 0;
+    ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
+                            libc_dlclose_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
+
+    retval = 0;
+    ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("dlcall %s %s ok ret=%d", soname.c_str(), targetfunc.c_str(), retval);
 
     return 0;
 }
@@ -1023,7 +1157,7 @@ int program_call(int argc, char **argv) {
         return -1;
     }
 
-    LOG("call  %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
+    LOG("call %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
 
     return 0;
 }
@@ -1102,7 +1236,8 @@ int program_replace(int argc, char **argv) {
 
     LOG("start inject so file %s", targetso.c_str());
 
-    ret = inject_so(pid, targetso);
+    uint64_t handle = 0;
+    ret = inject_so(pid, targetso, handle);
     if (ret != 0) {
         return -1;
     }
@@ -1202,6 +1337,10 @@ int main(int argc, char **argv) {
         ret = program_call(argc, argv);
     } else if (type == "dlopen") {
         ret = program_dlopen(argc, argv);
+    } else if (type == "dlclose") {
+        ret = program_dlclose(argc, argv);
+    } else if (type == "dlcall") {
+        ret = program_dlcall(argc, argv);
     } else {
         usage();
         ret = -1;
