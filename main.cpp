@@ -230,9 +230,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
 
         const char *sep = "\t \r\n";
         char *line = NULL;
-        for (char *token = strtok_r(buf, sep, &line);
-             token != NULL;
-             token = strtok_r(NULL, ",", &line)) {
+        for (char *token = strtok_r(buf, sep, &line); token != NULL; token = strtok_r(NULL, sep, &line)) {
             tmp.push_back(token);
         }
 
@@ -241,6 +239,13 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
         }
 
         std::string path = tmp[tmp.size() - 1];
+        if (path == "(deleted)") {
+            if (tmp.size() < 2) {
+                continue;
+            }
+            path = tmp[tmp.size() - 2];
+        }
+
         int pos = path.find_last_of("/");
         if (pos == -1) {
             continue;
@@ -444,28 +449,69 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     return 0;
 }
 
-int main(int argc, char **argv) {
+int inject_so(pid_t pid, const std::string &sopath) {
 
-    if (argc < 3) {
-        fprintf(stderr, "hookplt: pid target.so target.func\n");
+    return 0;
+}
+
+int usage() {
+    printf("\n"
+           "hookso: type params\n"
+           "\n"
+           "eg:\n"
+           "\n"
+           "./hookso replace pid src.so srcfunc target.so target.func\n"
+    );
+    return 1;
+}
+
+int replace(int argc, char **argv) {
+
+    if (argc < 6) {
+        usage();
         return 1;
     }
 
-    printf("pid=%s\n", argv[1]);
-    printf("target so=%s\n", argv[2]);
-    printf("target function=%s\n", argv[3]);
+    std::string pidstr = argv[2];
+    std::string srcso = argv[3];
+    std::string srcfunc = argv[4];
+    std::string targetso = argv[5];
+    std::string targetfunc = argv[6];
 
-    printf("start parse so file %s %s\n", argv[2], argv[3]);
+    printf("pid=%s\n", pidstr.c_str());
+    printf("src so=%s\n", srcso.c_str());
+    printf("src function=%s\n", srcfunc.c_str());
+    printf("target so=%s\n", targetso.c_str());
+    printf("target function=%s\n", targetfunc.c_str());
 
-    int pid = atoi(argv[1]);
+    printf("start parse so file %s %s\n", srcso.c_str(), srcfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
 
     uint64_t old_funcaddr_plt_offset = 0;
     void *old_funcaddr = 0;
-    int ret = find_so_func_addr(pid, argv[2], argv[3], old_funcaddr_plt_offset, old_funcaddr);
+    int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt_offset, old_funcaddr);
     if (ret != 0) {
         return 1;
     }
 
-    printf("%s old %s %p offset %lu\n", argv[2], argv[3], old_funcaddr, old_funcaddr_plt_offset);
+    printf("%s old %s %p offset %lu\n", srcso.c_str(), srcfunc.c_str(), old_funcaddr, old_funcaddr_plt_offset);
+
     return 0;
+}
+
+int main(int argc, char **argv) {
+
+    if (argc < 2) {
+        usage();
+        return 1;
+    }
+
+    std::string type = argv[1];
+
+    if (type == "replace") {
+        return replace(argc, argv);
+    } else {
+        return usage();
+    }
 }
