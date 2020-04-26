@@ -913,9 +913,11 @@ int usage() {
            "eg:\n"
            "\n"
            "do syscall: \n"
-           "./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" i=int-param3 \n"
-           "open .so function: \n"
-           "./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" i=int-param3 \n"
+           "./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "call .so function: \n"
+           "./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "dlopen .so: \n"
+           "./hookso dlopen pid target-so-path \n"
            "do syscall: \n"
            "./hookso replace pid src-so src-func target-so-path target-func \n"
     );
@@ -950,6 +952,32 @@ int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
 
     ERR("parse arg fail %s", arg.c_str());
     return -1;
+}
+
+int program_dlopen(int argc, char **argv) {
+
+    if (argc < 4) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+
+    LOG("start inject so file %s", targetso.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    int ret = inject_so(pid, targetso);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("inject so file %s ok", targetso.c_str());
+
+    return 0;
 }
 
 int program_call(int argc, char **argv) {
@@ -1079,6 +1107,8 @@ int program_replace(int argc, char **argv) {
         return -1;
     }
 
+    LOG("inject so file %s ok", targetso.c_str());
+
     return 0;
 }
 
@@ -1170,6 +1200,8 @@ int main(int argc, char **argv) {
         ret = program_syscall(argc, argv);
     } else if (type == "call") {
         ret = program_call(argc, argv);
+    } else if (type == "dlopen") {
+        ret = program_dlopen(argc, argv);
     } else {
         usage();
         ret = -1;
