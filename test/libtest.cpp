@@ -1,6 +1,8 @@
 #include <stdio.h>
 
 extern "C" bool libtest(int n) {
-    printf("libtest %d \n", n);
+    char buff[128] = {0};
+    snprintf(buff, sizeof(buff), "libtest %d", n);
+    puts(buff);
     return false;
 }
