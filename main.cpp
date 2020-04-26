@@ -68,7 +68,7 @@ void log(FILE *fd, const char *header, const char *file, const char *func, int p
     va_end(ap);
 }
 
-int remote_process_vm_readv(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_vm_readv(int remote_pid, void *address, void *buffer, size_t len) {
     struct iovec local[1] = {};
     struct iovec remote[1] = {};
     int errsv = 0;
@@ -90,7 +90,7 @@ int remote_process_vm_readv(pid_t remote_pid, void *address, void *buffer, size_
     return 0;
 }
 
-int remote_process_ptrace_read(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_ptrace_read(int remote_pid, void *address, void *buffer, size_t len) {
     int errsv = 0;
 
     char file[PATH_MAX];
@@ -117,7 +117,7 @@ int remote_process_ptrace_read(pid_t remote_pid, void *address, void *buffer, si
     return 0;
 }
 
-int remote_process_ptrace_word_read(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_ptrace_word_read(int remote_pid, void *address, void *buffer, size_t len) {
     char *dest = (char *) buffer;
     char *addr = (char *) address;
     while (len >= sizeof(long)) {
@@ -146,7 +146,7 @@ int remote_process_ptrace_word_read(pid_t remote_pid, void *address, void *buffe
     return 0;
 }
 
-int remote_process_read(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_read(int remote_pid, void *address, void *buffer, size_t len) {
     int ret = 0;
     ret = remote_process_vm_readv(remote_pid, address, buffer, len);
     if (ret == 0) {
@@ -164,7 +164,7 @@ int remote_process_read(pid_t remote_pid, void *address, void *buffer, size_t le
     return ret;
 }
 
-int remote_process_vm_writev(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_vm_writev(int remote_pid, void *address, void *buffer, size_t len) {
     struct iovec local[1] = {};
     struct iovec remote[1] = {};
     int errsv = 0;
@@ -186,7 +186,7 @@ int remote_process_vm_writev(pid_t remote_pid, void *address, void *buffer, size
     return 0;
 }
 
-int remote_process_ptrace_write(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_ptrace_write(int remote_pid, void *address, void *buffer, size_t len) {
     int errsv = 0;
 
     char file[PATH_MAX];
@@ -213,7 +213,7 @@ int remote_process_ptrace_write(pid_t remote_pid, void *address, void *buffer, s
     return 0;
 }
 
-int remote_process_ptrace_word_write(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_ptrace_word_write(int remote_pid, void *address, void *buffer, size_t len) {
     const char *src = (const char *) buffer;
     char *addr = (char *) address;
     while (len >= sizeof(long)) {
@@ -242,7 +242,7 @@ int remote_process_ptrace_word_write(pid_t remote_pid, void *address, void *buff
     return 0;
 }
 
-int remote_process_write(pid_t remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_write(int remote_pid, void *address, void *buffer, size_t len) {
     int ret = 0;
     ret = remote_process_vm_writev(remote_pid, address, buffer, len);
     if (ret == 0) {
@@ -260,7 +260,7 @@ int remote_process_write(pid_t remote_pid, void *address, void *buffer, size_t l
     return ret;
 }
 
-int find_so_func_addr(pid_t pid, const std::string &soname,
+int find_so_func_addr(int pid, const std::string &soname,
                       const std::string &funcname,
                       uint64_t &funcaddr_plt_offset, void *&funcaddr) {
 
@@ -503,7 +503,7 @@ int find_so_func_addr(pid_t pid, const std::string &soname,
     return 0;
 }
 
-int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
+int find_libc_name(int pid, std::string &name, void *&psostart) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -584,12 +584,13 @@ char *gpcalladdr = 0;
 uint64_t gbackupcode = 0;
 char *gpcallstack = 0;
 const int callstack_len = 8 * 1024 * 1024;
+std::map<uint64_t, int> gallocmem;
 
 const int syscall_sys_mmap = 9;
 const int syscall_sys_mprotect = 10;
 const int syscall_sys_munmap = 11;
 
-int funccall_so(pid_t pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
+int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
                 uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
 
     struct user_regs_struct oldregs;
@@ -701,7 +702,7 @@ int funccall_so(pid_t pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, 
     return 0;
 }
 
-int syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0,
+int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0,
                uint64_t arg3 = 0, uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
 
     struct user_regs_struct oldregs;
@@ -810,7 +811,7 @@ int syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 
     return 0;
 }
 
-int alloc_so_string_mem(pid_t pid, std::string str, void *&targetaddr, int &targetlen) {
+int alloc_so_string_mem(int pid, const std::string &str, void *&targetaddr, int &targetlen) {
 
     int slen = str.length() + 1;
     int pagesize = sysconf(_SC_PAGESIZE);
@@ -828,6 +829,8 @@ int alloc_so_string_mem(pid_t pid, std::string str, void *&targetaddr, int &targ
         return -1;
     }
 
+    gallocmem[retval] = len;
+
     ret = remote_process_write(pid, (void *) retval, (void *) str.c_str(), str.length());
     if (ret != 0) {
         return -1;
@@ -841,7 +844,7 @@ int alloc_so_string_mem(pid_t pid, std::string str, void *&targetaddr, int &targ
     return 0;
 }
 
-int free_so_string_mem(pid_t pid, void *targetaddr, int targetlen) {
+int free_so_string_mem(int pid, void *targetaddr, int targetlen) {
 
     LOG("start syscall sys_munmap %p %d", targetaddr, targetlen);
 
@@ -854,12 +857,14 @@ int free_so_string_mem(pid_t pid, void *targetaddr, int targetlen) {
         return -1;
     }
 
+    gallocmem.erase((uint64_t) targetaddr);
+
     LOG("syscall sys_munmap ok %p %d", targetaddr, targetlen);
 
     return 0;
 }
 
-int inject_so(pid_t pid, const std::string &sopath) {
+int inject_so(int pid, const std::string &sopath) {
 
     char abspath[PATH_MAX];
     if (realpath(sopath.c_str(), abspath) == NULL) {
@@ -887,15 +892,13 @@ int inject_so(pid_t pid, const std::string &sopath) {
     uint64_t retval = 0;
     ret = funccall_so(pid, retval, libc_dlopen_mode_funcaddr, (uint64_t) dlopen_straddr, RTLD_LAZY);
     if (ret != 0) {
-        free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
         return -1;
     }
     if (retval == (uint64_t)(-1)) {
-        free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
         return -1;
     }
 
-    ret = free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
+    //ret = free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
     if (ret != 0) {
         return -1;
     }
@@ -909,12 +912,86 @@ int usage() {
            "\n"
            "eg:\n"
            "\n"
-           "./hookso replace pid src-so srcfunc target-so-path target-func\n"
+           "do syscall: \n"
+           "./hookso syscall pid syscall-number int-param1 \"string-param2\" int-param3 \n"
+           "do syscall: \n"
+           "./hookso replace pid src-so srcfunc target-so-path target-func \n"
     );
     return -1;
 }
 
-int replace(int argc, char **argv) {
+int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
+
+    std::regex str_regex("\"(.*)\"");
+    if (std::regex_search(arg, str_regex)) {
+        void *arg_straddr = 0;
+        int arg_strlen = 0;
+        int ret = alloc_so_string_mem(pid, arg, arg_straddr, arg_strlen);
+        if (ret != 0) {
+            return -1;
+        }
+        retval = (uint64_t) arg_straddr;
+        return 0;
+    }
+
+    std::regex int_regex("(\\+|-)?[[:digit:]]+");
+    if (std::regex_search(arg, int_regex)) {
+        retval = atoi(arg.c_str());
+        return 0;
+    }
+
+    std::regex float_regex("^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$");
+    if (std::regex_search(arg, float_regex)) {
+        retval = (uint64_t) atof(arg.c_str());
+        return 0;
+    }
+
+    ERR("parse arg fail %s", arg.c_str());
+    return -1;
+}
+
+int program_syscall(int argc, char **argv) {
+
+    if (argc < 4) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string syscallnostr = argv[3];
+    LOG("pid=%s", pidstr.c_str());
+    LOG("syscall no=%s", syscallnostr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t arg[6] = {0};
+    for (int i = 4; i < argc; ++i) {
+        std::string argstr = argv[i];
+        int ret = parse_arg_to_so(pid, argstr, arg[i - 4]);
+        if (ret != 0) {
+            return -1;
+        }
+        LOG("parse %d arg %d", i - 3, arg[i - 4]);
+    }
+
+    int syscallno = atoi(syscallnostr.c_str());
+
+    LOG("start syscall %d %p %d", syscallno);
+
+    uint64_t retval = 0;
+    int ret = syscall_so(pid, retval, syscallno, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("syscall %d ok ret=%d", syscallno, retval);
+
+    return 0;
+}
+
+int program_replace(int argc, char **argv) {
 
     if (argc < 6) {
         return usage();
@@ -955,7 +1032,7 @@ int replace(int argc, char **argv) {
     return 0;
 }
 
-int ini_hookso_env(pid_t pid) {
+int ini_hookso_env(int pid) {
 
     LOG("start ini hookso env");
 
@@ -1005,22 +1082,16 @@ int ini_hookso_env(pid_t pid) {
     return 0;
 }
 
-int fini_hookso_env(pid_t pid) {
+int fini_hookso_env(int pid) {
+
+    for (auto&[ptr, len]: gallocmem) {
+        free_so_string_mem(pid, (void *) ptr, len);
+    }
 
     uint64_t retval = 0;
-    int ret = syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
-    if (ret != 0) {
-        return -1;
-    }
-    if (retval == (uint64_t)(-1)) {
-        return -1;
-    }
+    syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
 
-    ret = ptrace(PTRACE_DETACH, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_DETACH fail", pid);
-        return -1;
-    }
+    ptrace(PTRACE_DETACH, pid, 0, 0);
 
     LOG("fini hookso env ok");
 
@@ -1044,7 +1115,9 @@ int main(int argc, char **argv) {
     }
 
     if (type == "replace") {
-        ret = replace(argc, argv);
+        ret = program_replace(argc, argv);
+    } else if (type == "syscall") {
+        ret = program_syscall(argc, argv);
     } else {
         usage();
         ret = -1;
