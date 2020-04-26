@@ -898,7 +898,7 @@ int inject_so(int pid, const std::string &sopath) {
         return -1;
     }
 
-    //ret = free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
+    ret = free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
     if (ret != 0) {
         return -1;
     }
@@ -913,9 +913,11 @@ int usage() {
            "eg:\n"
            "\n"
            "do syscall: \n"
-           "./hookso syscall pid syscall-number int-param1 \"string-param2\" int-param3 \n"
+           "./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" i=int-param3 \n"
+           "open .so function: \n"
+           "./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" i=int-param3 \n"
            "do syscall: \n"
-           "./hookso replace pid src-so srcfunc target-so-path target-func \n"
+           "./hookso replace pid src-so src-func target-so-path target-func \n"
     );
     return -1;
 }
@@ -948,6 +950,54 @@ int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
 
     ERR("parse arg fail %s", arg.c_str());
     return -1;
+}
+
+int program_call(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t arg[6] = {0};
+    for (int i = 5; i < argc; ++i) {
+        std::string argstr = argv[i];
+        int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
+        if (ret != 0) {
+            return -1;
+        }
+        LOG("parse %d arg %d", i - 4, arg[i - 5]);
+    }
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    uint64_t target_funcaddr_plt_offset = 0;
+    void *target_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt_offset, target_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("call  %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
+
+    return 0;
 }
 
 int program_syscall(int argc, char **argv) {
@@ -1118,6 +1168,8 @@ int main(int argc, char **argv) {
         ret = program_replace(argc, argv);
     } else if (type == "syscall") {
         ret = program_syscall(argc, argv);
+    } else if (type == "call") {
+        ret = program_call(argc, argv);
     } else {
         usage();
         ret = -1;
