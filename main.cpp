@@ -38,6 +38,7 @@
 #include <regex>
 #include <sys/user.h>
 #include <sys/mman.h>
+#include <dlfcn.h>
 
 #define PROCMAPS_LINE_MAX_LENGTH (PATH_MAX + 100)
 
@@ -255,7 +256,7 @@ int remote_process_write(pid_t remote_pid, void *address, void *buffer, size_t l
     if (ret == 0) {
         return ret;
     }
-    ERR("remote_process_read fail %p %d %s", address, ret, strerror(ret));
+    ERR("remote_process_write fail %p %d %s", address, ret, strerror(ret));
     return ret;
 }
 
@@ -581,15 +582,127 @@ int find_libc_name(pid_t pid, std::string &name, void *&psostart) {
 std::string glibcname = "";
 char *gpcalladdr = 0;
 uint64_t gbackupcode = 0;
+char *gpcallstack = 0;
+const int callstack_len = 8 * 1024 * 1024;
 
 const int syscall_sys_mmap = 9;
 const int syscall_sys_mprotect = 10;
 const int syscall_sys_munmap = 11;
 
-int
-syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
-           uint64_t arg4 = 0,
-           uint64_t arg5 = 0, uint64_t arg6 = 0) {
+int funccall_so(pid_t pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
+                uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
+
+    struct user_regs_struct oldregs;
+    int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_GETREGS fail", pid);
+        return -1;
+    }
+
+    char code[8];
+    // ff d0 : callq *%rax
+    code[0] = 0xff;
+    code[1] = 0xd0;
+    // cc    : int3
+    code[2] = 0xcc;
+    // nop
+    memset(&code[3], 0x90, sizeof(code) - 3);
+
+    // setup registers
+    struct user_regs_struct regs = oldregs;
+    regs.rip = (uint64_t) gpcalladdr;
+    regs.rbp = (uint64_t)(gpcallstack + callstack_len - 16);
+    // rsp must be aligned to a 16-byte boundary
+    regs.rsp = (uint64_t)(gpcallstack + callstack_len - (2 * 16));
+    regs.rax = (uint64_t) funcaddr;
+    regs.rdi = arg1;
+    regs.rsi = arg2;
+    regs.rdx = arg3;
+    regs.rcx = arg4;
+    regs.r8 = arg5;
+    regs.r9 = arg6;
+
+    ret = remote_process_write(pid, gpcalladdr, code, sizeof(code));
+    if (ret < 0) {
+        return -1;
+    }
+
+    ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        return -1;
+    }
+
+    ret = ptrace(PTRACE_CONT, pid, 0, 0);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_CONT fail", pid);
+        return -1;
+    }
+
+    int errsv = 0;
+    int status = 0;
+    while (1) {
+        ret = waitpid(pid, &status, 0);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ERR("waitpid error: %d %s", errno, strerror(errno));
+            errsv = errno;
+            break;
+        }
+
+        if (WIFSTOPPED(status)) {
+            if (WSTOPSIG(status) == SIGTRAP) {
+                // ok
+                break;
+            } else {
+                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
+                errsv = -1;
+                break;
+            }
+        } else if (WIFEXITED(status)) {
+            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
+            errsv = -1;
+            break;
+        } else if (WIFSIGNALED(status)) {
+            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
+            errsv = -1;
+            break;
+        } else {
+            ERR("unexpected waitpid status: 0x%x", status);
+            errsv = -1;
+            break;
+        }
+    }
+
+    if (!errsv) {
+        int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            return -1;
+        }
+        retval = regs.rax;
+    } else {
+        retval = -1;
+    }
+
+    ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        return -1;
+    }
+
+    ret = remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
+    if (ret < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int syscall_so(pid_t pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0,
+               uint64_t arg3 = 0, uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
 
     struct user_regs_struct oldregs;
     int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
@@ -753,6 +866,7 @@ int inject_so(pid_t pid, const std::string &sopath) {
         ERR("failed to get the full path of %s : %s", sopath.c_str(), strerror(errno));
         return -1;
     }
+    LOG("start inject so %s", abspath);
 
     uint64_t libc_dlopen_mode_funcaddr_plt_offset = 0;
     void *libc_dlopen_mode_funcaddr = 0;
@@ -767,6 +881,17 @@ int inject_so(pid_t pid, const std::string &sopath) {
     int dlopen_strlen = 0;
     ret = alloc_so_string_mem(pid, abspath, dlopen_straddr, dlopen_strlen);
     if (ret != 0) {
+        return -1;
+    }
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, libc_dlopen_mode_funcaddr, (uint64_t) dlopen_straddr, RTLD_LAZY);
+    if (ret != 0) {
+        free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        free_so_string_mem(pid, dlopen_straddr, dlopen_strlen);
         return -1;
     }
 
@@ -834,9 +959,21 @@ int ini_hookso_env(pid_t pid) {
 
     LOG("start ini hookso env");
 
+    int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_ATTACH fail", pid);
+        return -1;
+    }
+
+    ret = waitpid(pid, NULL, 0);
+    if (ret < 0) {
+        ERR("ptrace %d waitpid fail", pid);
+        return -1;
+    }
+
     std::string libcname;
     void *plibcaddr;
-    int ret = find_libc_name(pid, libcname, plibcaddr);
+    ret = find_libc_name(pid, libcname, plibcaddr);
     if (ret != 0) {
         return -1;
     }
@@ -850,7 +987,42 @@ int ini_hookso_env(pid_t pid) {
     gpcalladdr = (char *) ((uint64_t) plibcaddr + 8); // Elf64_Ehdr e_ident[8-16]
     gbackupcode = code;
 
-    LOG("ini hookso env glibcname=%s gpcalladdr=%p backupcode=%lu", glibcname.c_str(), gpcalladdr, gbackupcode);
+    uint64_t retval = 0;
+    ret = syscall_so(pid, retval, syscall_sys_mmap, 0, callstack_len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN,
+                     -1, 0);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+    gpcallstack = (char *) retval;
+
+    LOG("ini hookso env glibcname=%s gpcalladdr=%p backupcode=%lu stack=%p", glibcname.c_str(), gpcalladdr, gbackupcode,
+        gpcallstack);
+
+    return 0;
+}
+
+int fini_hookso_env(pid_t pid) {
+
+    uint64_t retval = 0;
+    int ret = syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    ret = ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_DETACH fail", pid);
+        return -1;
+    }
+
+    LOG("fini hookso env ok");
 
     return 0;
 }
@@ -866,19 +1038,7 @@ int main(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_ATTACH fail", pid);
-        return -1;
-    }
-
-    ret = waitpid(pid, NULL, 0);
-    if (ret < 0) {
-        ERR("ptrace %d waitpid fail", pid);
-        return -1;
-    }
-
-    ret = ini_hookso_env(pid);
+    int ret = ini_hookso_env(pid);
     if (ret < 0) {
         return -1;
     }
@@ -890,9 +1050,8 @@ int main(int argc, char **argv) {
         ret = -1;
     }
 
-    ret = ptrace(PTRACE_DETACH, pid, 0, 0);
+    ret = fini_hookso_env(pid);
     if (ret < 0) {
-        ERR("ptrace %d PTRACE_DETACH fail", pid);
         return -1;
     }
 
