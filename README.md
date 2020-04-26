@@ -57,8 +57,12 @@ libtest 12717
 * 示例3：让test加载libtestnew.so
 ```
 # ./hookso dlopen 11234 ./test/libtestnew.so 
+...
+[DEBUG][2020.4.26,21:3:16,903]main.cpp:906,inject_so: inject so /home/project/hookso/test/libtestnew.so ok handle=17128640
+[DEBUG][2020.4.26,21:3:16,903]main.cpp:1022,program_dlopen: inject so file ./test/libtestnew.so ok
+[DEBUG][2020.4.26,21:3:16,903]main.cpp:1220,fini_hookso_env: fini hookso env ok
 ```
-然后查看系统/proc/11234/maps
+注意这里的handle=17128640，这个handle后面卸载会用到。然后查看系统/proc/11234/maps
 ```
 # cat /proc/11234/maps 
 00400000-00401000 r-xp 00000000 fc:01 678978                             /home/project/hookso/test/test
@@ -72,4 +76,24 @@ libtest 12717
 ```
 可以看到libtestnew.so已经成功加载
 
-* 示例3：让test卸载libtestnew.so
+* 示例4：让test卸载libtestnew.so
+```
+# ./hookso dlclose 11234 17128640
+```
+这个17128640是dlopen返回的handle值，多次dlopen的值是一样。然后查看系统/proc/11234/maps
+```
+# cat /proc/16992/maps 
+00400000-00401000 r-xp 00000000 fc:01 678978                             /home/project/hookso/test/test
+00600000-00601000 r--p 00000000 fc:01 678978                             /home/project/hookso/test/test
+00601000-00602000 rw-p 00001000 fc:01 678978                             /home/project/hookso/test/test
+01044000-01076000 rw-p 00000000 00:00 0                                  [heap]
+7fb3525ab000-7fb352765000 r-xp 00000000 fc:01 25054                      /usr/lib64/libc-2.17.so
+7fb352765000-7fb352964000 ---p 001ba000 fc:01 25054                      /usr/lib64/libc-2.17.so
+7fb352964000-7fb352968000 r--p 001b9000 fc:01 25054                      /usr/lib64/libc-2.17.so
+7fb352968000-7fb35296a000 rw-p 001bd000 fc:01 25054                      /usr/lib64/libc-2.17.so
+```
+可以看到已经没用libtestnew.so了
+
+* 示例5：让test加载libtestnew.so，执行libtestnew，然后卸载libtestnew.so
+
+
