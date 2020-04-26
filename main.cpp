@@ -922,27 +922,27 @@ int usage() {
 
 int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
 
-    std::regex str_regex("\"(.*)\"");
-    if (std::regex_search(arg, str_regex)) {
-        void *arg_straddr = 0;
-        int arg_strlen = 0;
-        int ret = alloc_so_string_mem(pid, arg, arg_straddr, arg_strlen);
-        if (ret != 0) {
-            return -1;
-        }
-        retval = (uint64_t) arg_straddr;
+    // i=1234
+    if (arg[0] == 'i') {
+        retval = atoi(arg.substr(2).c_str());
         return 0;
     }
 
-    std::regex int_regex("(\\+|-)?[[:digit:]]+");
-    if (std::regex_search(arg, int_regex)) {
+    // f=1234.44
+    if (arg[0] == 'f') {
         retval = atoi(arg.c_str());
         return 0;
     }
 
-    std::regex float_regex("^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$");
-    if (std::regex_search(arg, float_regex)) {
-        retval = (uint64_t) atof(arg.c_str());
+    // s=a b c d
+    if (arg[0] == 's') {
+        void *arg_straddr = 0;
+        int arg_strlen = 0;
+        int ret = alloc_so_string_mem(pid, arg.substr(2), arg_straddr, arg_strlen);
+        if (ret != 0) {
+            return -1;
+        }
+        retval = (uint64_t) arg_straddr;
         return 0;
     }
 
