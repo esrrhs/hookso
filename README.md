@@ -111,4 +111,36 @@ libtest 155
 * 示例6：让test加载libtestnew.so，并把libtest.so的puts函数，跳转到libtestnew的putsnew
 ```
 # ./hookso replace 11234 libtest.so puts ./test/libtestnew.so putsnew
+...
+[DEBUG][2020.4.27,11:24:3,440]main.cpp:1260,program_setfunc: set plt func libtest.so puts ok from 0x7f3896c28761 to 0x7f3897796f20
+[DEBUG][2020.4.27,11:24:3,440]main.cpp:1261,program_setfunc: old func backup=139881024227169
 ```
+然后观察test的输出，可以看到已经调用到了putsnew方法。注意这里的old func backup=139881024227169，后面我们复原会用到
+```
+libtest 3313
+libtest 3314
+libtest 3315
+libtest 3316
+libtest 3317
+putsnew libtest 3318
+putsnew libtest 3319
+putsnew libtest 3320
+```
+
+* 示例7：让test的libtest.so的puts函数，恢复到之前，这里的139881036214048就是之前replace输出的旧值
+```
+# ./hookso setfunc 11234 libtest.so puts 139881036214048
+```
+然后观察test的输出，可以看到又重新回到了puts方法
+```
+putsnew libtest 44
+putsnew libtest 45
+putsnew libtest 46
+libtest 47
+libtest 48
+libtest 49
+```
+然后可以再用dlclose卸载刚才加载的libtestnew.so，这里不再赘述
+
+* 示例8：让test加载libtestnew.so，并把libtest.so的libtest函数，跳转到libtestnew的libtestnew，这个和示例6的区别是libtest是libtest.so内部实现的函数，puts是libtest.so调用的外部函数
+
