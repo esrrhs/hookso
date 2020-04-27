@@ -262,7 +262,7 @@ int remote_process_write(int remote_pid, void *address, void *buffer, size_t len
 
 int find_so_func_addr(int pid, const std::string &soname,
                       const std::string &funcname,
-                      void * &funcaddr_plt, void *&funcaddr) {
+                      void *&funcaddr_plt, void *&funcaddr) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -873,7 +873,7 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     }
     LOG("start inject so %s", abspath);
 
-    void * libc_dlopen_mode_funcaddr_plt = 0;
+    void *libc_dlopen_mode_funcaddr_plt = 0;
     void *libc_dlopen_mode_funcaddr = 0;
     int ret = find_so_func_addr(pid, glibcname, "__libc_dlopen_mode", libc_dlopen_mode_funcaddr_plt,
                                 libc_dlopen_mode_funcaddr);
@@ -916,15 +916,26 @@ int usage() {
            "eg:\n"
            "\n"
            "do syscall: \n"
-           "./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "\n"
            "call .so function: \n"
-           "./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "\n"
            "dlopen .so: \n"
-           "./hookso dlopen pid target-so-path \n"
+           "# ./hookso dlopen pid target-so-path \n"
+           "\n"
            "dlclose .so: \n"
-           "./hookso dlclose pid handle \n"
+           "# ./hookso dlclose pid handle \n"
+           "\n"
            "open .so and call function and close: \n"
-           "./hookso dlcall pid target-so-path target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso dlcall pid target-so-path target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "\n"
+           "replace src.so old-function to target.so new-function: \n"
+           "# ./hookso replace pid src-so src-func target-so-path target-func \n"
+           "\n"
+           "set target.so target-function new value : \n"
+           "# ./hookso setfunc pid target-so target-func value \n"
+           "\n"
     );
     return -1;
 }
@@ -963,7 +974,7 @@ int close_so(int pid, uint64_t handle) {
 
     LOG("start close so %lu", handle);
 
-    void * libc_dlclose_funcaddr_plt = 0;
+    void *libc_dlclose_funcaddr_plt = 0;
     void *libc_dlclose_funcaddr = 0;
     int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt,
                                 libc_dlclose_funcaddr);
@@ -1085,7 +1096,7 @@ int program_dlcall(int argc, char **argv) {
         return !std::isspace(ch);
     }).base(), soname.end());
 
-    void * target_funcaddr_plt = 0;
+    void *target_funcaddr_plt = 0;
     void *target_funcaddr = 0;
     ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
@@ -1142,7 +1153,7 @@ int program_call(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void * target_funcaddr_plt = 0;
+    void *target_funcaddr_plt = 0;
     void *target_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
@@ -1204,9 +1215,58 @@ int program_syscall(int argc, char **argv) {
     return 0;
 }
 
-int program_replace(int argc, char **argv) {
+int program_setfunc(int argc, char **argv) {
 
     if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    std::string valuestr = argv[5];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+    LOG("valuestr=%s", valuestr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    uint64_t value = atol(valuestr.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    void *old_funcaddr_plt = 0;
+    void *old_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
+
+    if (old_funcaddr_plt == 0) {
+        // func in .so
+
+
+    } else {
+        // func out .so
+        void *new_funcaddr = (void *) value;
+        ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
+        if (ret != 0) {
+            return -1;
+        }
+
+        LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr, new_funcaddr);
+        LOG("old func backup=%lu", (uint64_t) old_funcaddr);
+    }
+
+    return 0;
+}
+
+int program_replace(int argc, char **argv) {
+
+    if (argc < 7) {
         return usage();
     }
 
@@ -1226,7 +1286,7 @@ int program_replace(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    void * old_funcaddr_plt = 0;
+    void *old_funcaddr_plt = 0;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
@@ -1245,17 +1305,27 @@ int program_replace(int argc, char **argv) {
 
     LOG("inject so file %s ok", targetso.c_str());
 
-    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+    int pos = targetso.find_last_of("/");
+    if (pos == -1) {
+        ERR("target so invalid %s", targetso.c_str());
+        return -1;
+    }
+    std::string soname = targetso.substr(pos + 1);
+    soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
+        return !std::isspace(ch);
+    }).base(), soname.end());
 
-    void * new_funcaddr_plt = 0;
+    LOG("start parse so file %s %s", soname.c_str(), targetfunc.c_str());
+
+    void *new_funcaddr_plt = 0;
     void *new_funcaddr = 0;
-    ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
+    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
     if (ret != 0) {
         close_so(pid, handle);
         return -1;
     }
 
-    LOG("new %s %s=%p offset=%p", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
+    LOG("new %s %s=%p offset=%p", soname.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
 
     if (old_funcaddr_plt == 0) {
         // func in .so
@@ -1263,10 +1333,16 @@ int program_replace(int argc, char **argv) {
 
     } else {
         // func out .so
+        ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
 
-
+        LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
+            soname.c_str(), targetfunc.c_str(), new_funcaddr);
+        LOG("old func backup=%lu", (uint64_t) old_funcaddr);
     }
-
 
     return 0;
 }
@@ -1315,7 +1391,8 @@ int ini_hookso_env(int pid) {
     }
     gpcallstack = (char *) retval;
 
-    LOG("ini hookso env glibcname=%s gpcalladdr=%p backupcode=%lu stack=%p", glibcname.c_str(), gpcalladdr, gbackupcode,
+    LOG("ini hookso env glibcname=%s gpcalladdr=%p backupcode=%lu stack=%p", glibcname.c_str(), gpcalladdr,
+        gbackupcode,
         gpcallstack);
 
     return 0;
@@ -1365,6 +1442,8 @@ int main(int argc, char **argv) {
         ret = program_dlclose(argc, argv);
     } else if (type == "dlcall") {
         ret = program_dlcall(argc, argv);
+    } else if (type == "setfunc") {
+        ret = program_setfunc(argc, argv);
     } else {
         usage();
         ret = -1;
