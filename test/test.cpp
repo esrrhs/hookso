@@ -14,10 +14,9 @@ int main() {
 
     int n = 0;
     while (1) {
-        //calls puts() from libc.so twice
         if (libtest(n++)) {
             break;
-        };
+        }
         sleep(1);
     }
 
