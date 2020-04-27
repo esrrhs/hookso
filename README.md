@@ -88,7 +88,7 @@ libtest 12703
 ```
 # ./hookso call 11234 libtest.so libtest i=1234
 ```
-然后观察test的输出，可以看到haha输出
+然后观察test的输出，可以看到输出
 ```
 libtest 12713
 libtest 12714
