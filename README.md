@@ -109,4 +109,6 @@ libtest 155
 ```
 
 * 示例6：让test加载libtestnew.so，并把libtest.so的puts函数，跳转到libtestnew的putsnew
-
+```
+# ./hookso replace 11234 libtest.so puts ./test/libtestnew.so putsnew
+```

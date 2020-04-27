@@ -959,6 +959,33 @@ int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
     return -1;
 }
 
+int close_so(int pid, uint64_t handle) {
+
+    LOG("start close so %lu", handle);
+
+    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
+    void *libc_dlclose_funcaddr = 0;
+    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
+                                libc_dlclose_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("close so %lu ok", handle);
+
+    return 0;
+}
+
 int program_dlclose(int argc, char **argv) {
 
     if (argc < 4) {
@@ -976,21 +1003,8 @@ int program_dlclose(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
     uint64_t handle = atol(handlestr.c_str());
 
-    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
-    void *libc_dlclose_funcaddr = 0;
-    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
-                                libc_dlclose_funcaddr);
+    int ret = close_so(pid, handle);
     if (ret != 0) {
-        return -1;
-    }
-    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
-
-    uint64_t retval = 0;
-    ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
-    if (ret != 0) {
-        return -1;
-    }
-    if (retval == (uint64_t)(-1)) {
         return -1;
     }
 
@@ -1091,21 +1105,8 @@ int program_dlcall(int argc, char **argv) {
 
     LOG("start close so file %s %s", soname.c_str(), targetfunc.c_str());
 
-    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
-    void *libc_dlclose_funcaddr = 0;
-    ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
-                            libc_dlclose_funcaddr);
+    ret = close_so(pid, handle);
     if (ret != 0) {
-        return -1;
-    }
-    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
-
-    retval = 0;
-    ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
-    if (ret != 0) {
-        return -1;
-    }
-    if (retval == (uint64_t)(-1)) {
         return -1;
     }
 
