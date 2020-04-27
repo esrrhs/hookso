@@ -262,7 +262,7 @@ int remote_process_write(int remote_pid, void *address, void *buffer, size_t len
 
 int find_so_func_addr(int pid, const std::string &soname,
                       const std::string &funcname,
-                      uint64_t &funcaddr_plt_offset, void *&funcaddr) {
+                      void * &funcaddr_plt, void *&funcaddr) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -454,7 +454,7 @@ int find_so_func_addr(int pid, const std::string &soname,
         if (name == ".text") {
             void *func = (void *) (sobeginvalue + targetsym.st_value);
             LOG("target text func addr %p", func);
-            funcaddr_plt_offset = 0;
+            funcaddr_plt = 0;
             funcaddr = func;
             return 0;
         }
@@ -497,7 +497,7 @@ int find_so_func_addr(int pid, const std::string &soname,
 
     LOG("target got.plt func old addr %p", func);
 
-    funcaddr_plt_offset = relafunc.r_offset;
+    funcaddr_plt = (void *) (sobeginvalue + relafunc.r_offset);
     funcaddr = func;
 
     return 0;
@@ -873,9 +873,9 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     }
     LOG("start inject so %s", abspath);
 
-    uint64_t libc_dlopen_mode_funcaddr_plt_offset = 0;
+    void * libc_dlopen_mode_funcaddr_plt = 0;
     void *libc_dlopen_mode_funcaddr = 0;
-    int ret = find_so_func_addr(pid, glibcname, "__libc_dlopen_mode", libc_dlopen_mode_funcaddr_plt_offset,
+    int ret = find_so_func_addr(pid, glibcname, "__libc_dlopen_mode", libc_dlopen_mode_funcaddr_plt,
                                 libc_dlopen_mode_funcaddr);
     if (ret != 0) {
         return -1;
@@ -963,9 +963,9 @@ int close_so(int pid, uint64_t handle) {
 
     LOG("start close so %lu", handle);
 
-    uint64_t libc_dlclose_funcaddr_plt_offset = 0;
+    void * libc_dlclose_funcaddr_plt = 0;
     void *libc_dlclose_funcaddr = 0;
-    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt_offset,
+    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt,
                                 libc_dlclose_funcaddr);
     if (ret != 0) {
         return -1;
@@ -1085,9 +1085,9 @@ int program_dlcall(int argc, char **argv) {
         return !std::isspace(ch);
     }).base(), soname.end());
 
-    uint64_t target_funcaddr_plt_offset = 0;
+    void * target_funcaddr_plt = 0;
     void *target_funcaddr = 0;
-    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), target_funcaddr_plt_offset, target_funcaddr);
+    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
         return -1;
     }
@@ -1142,9 +1142,9 @@ int program_call(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    uint64_t target_funcaddr_plt_offset = 0;
+    void * target_funcaddr_plt = 0;
     void *target_funcaddr = 0;
-    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt_offset, target_funcaddr);
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
         return -1;
     }
@@ -1226,14 +1226,14 @@ int program_replace(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    uint64_t old_funcaddr_plt_offset = 0;
+    void * old_funcaddr_plt = 0;
     void *old_funcaddr = 0;
-    int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt_offset, old_funcaddr);
+    int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
         return -1;
     }
 
-    LOG("%s old %s %p offset %lu", srcso.c_str(), srcfunc.c_str(), old_funcaddr, old_funcaddr_plt_offset);
+    LOG("old %s %s=%p offset=%lu", srcso.c_str(), srcfunc.c_str(), old_funcaddr, old_funcaddr_plt);
 
     LOG("start inject so file %s", targetso.c_str());
 
@@ -1244,6 +1244,29 @@ int program_replace(int argc, char **argv) {
     }
 
     LOG("inject so file %s ok", targetso.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    void * new_funcaddr_plt = 0;
+    void *new_funcaddr = 0;
+    ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
+    if (ret != 0) {
+        close_so(pid, handle);
+        return -1;
+    }
+
+    LOG("new %s %s=%p offset=%p", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
+
+    if (old_funcaddr_plt == 0) {
+        // func in .so
+
+
+    } else {
+        // func out .so
+
+
+    }
+
 
     return 0;
 }
