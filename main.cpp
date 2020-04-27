@@ -600,7 +600,7 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
         return -1;
     }
 
-    char code[8];
+    char code[8] = {0};
     // ff d0 : callq *%rax
     code[0] = 0xff;
     code[1] = 0xd0;
@@ -712,7 +712,7 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
         return -1;
     }
 
-    char code[8];
+    char code[8] = {0};
     // 0f 05 : syscall
     code[0] = 0x0f;
     code[1] = 0x05;
@@ -1012,7 +1012,7 @@ int program_dlclose(int argc, char **argv) {
     LOG("start remove so file %s", handlestr.c_str());
 
     int pid = atoi(pidstr.c_str());
-    uint64_t handle = atol(handlestr.c_str());
+    uint64_t handle = std::stoull(handlestr.c_str());
 
     int ret = close_so(pid, handle);
     if (ret != 0) {
@@ -1232,7 +1232,7 @@ int program_setfunc(int argc, char **argv) {
     LOG("valuestr=%s", valuestr.c_str());
 
     int pid = atoi(pidstr.c_str());
-    uint64_t value = atol(valuestr.c_str());
+    uint64_t value = std::stoull(valuestr.c_str());
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
@@ -1247,8 +1247,19 @@ int program_setfunc(int argc, char **argv) {
 
     if (old_funcaddr_plt == 0) {
         // func in .so
+        uint64_t backup = 0;
+        ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+        if (ret != 0) {
+            return -1;
+        }
 
+        ret = remote_process_write(pid, old_funcaddr, &value, sizeof(value));
+        if (ret != 0) {
+            return -1;
+        }
 
+        LOG("set text func %s %s ok from %p to %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, value);
+        LOG("old func backup=%lu", backup);
     } else {
         // func out .so
         void *new_funcaddr = (void *) value;
@@ -1329,8 +1340,28 @@ int program_replace(int argc, char **argv) {
 
     if (old_funcaddr_plt == 0) {
         // func in .so
+        uint64_t backup = 0;
+        ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
 
+        int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
 
+        char code[8] = {0};
+        code[0] = 0xe9;
+        memcpy(&code[1], &offset, sizeof(offset));
+
+        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        LOG("replace text func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
+            soname.c_str(), targetfunc.c_str(), new_funcaddr);
+        LOG("old func backup=%lu", backup);
     } else {
         // func out .so
         ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
