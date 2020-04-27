@@ -6,7 +6,8 @@ hookso是一个linux工具，用来修改其他进程的动态链接库行为。
 * 让某个进程执行.so的某个函数
 * 给某个进程挂接新的.so
 * 卸载某个进程的.so
-* 让某个进程挂新的.so并执行新.so的某个函数
+* 把旧.so的函数替换为新.so的函数
+* 复原.so的函数替换
 
 # 编译
 git clone代码，运行脚本，生成hookso以及测试程序
@@ -192,4 +193,38 @@ libtest 49
 注意这时候libnewtest.so仍然在内存中，如果不需要可以用dlclose卸载它，这里不再赘述
 
 * 示例8：让test加载libtestnew.so，并把libtest.so的libtest函数，跳转到libtestnew的libtestnew，这个和示例6的区别是libtest是libtest.so内部实现的函数，puts是libtest.so调用的外部函数
+```
+# ./hookso replace 2936 libtest.so libtest ./test/libtestnew.so libtestnew
+...
+[DEBUG][2020.4.27,20:16:17,259]main.cpp:1353,program_replace: old func backup=10442863786053945429
+```
+注意这里的日志 old func backup=10442863786053945429，后面我们复原会用到。然后观察test的输出，可以看到调用了libtestnew.so的libtestnew函数
+```
+libtest 31714
+libtest 31715
+libtest 31716
+libtest 31717
+libtest 31718
+libtestnew 31719
+libtestnew 31720
+libtestnew 31721
+libtestnew 31722
+libtestnew 31723
+```
 
+* 示例9：让test的libtest.so的libtest函数，恢复到之前，这里的10442863786053945429就是之前示例8 replace输出的backup旧值
+```
+# ./hookso setfunc 11234 libtest.so puts 10442863786053945429
+...
+old func backup=1092601523177
+```
+然后观察test的输出，可以看到又回到了libtest.so的libtest函数
+```
+libtestnew 26
+libtestnew 27
+libtestnew 28
+libtestnew 29
+libtest 30
+libtest 31
+libtest 32
+```
