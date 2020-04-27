@@ -43,7 +43,13 @@
 #define PROCMAPS_LINE_MAX_LENGTH (PATH_MAX + 100)
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
+#ifdef DEBUG_LOG
 #define LOG(...) log(stdout, "[DEBUG]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#else
+#define LOG(...)
+#endif
+#define INFO(...) log(stdout, "[INFO]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define ERR(...) log(stderr, "[ERROR]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 void log(FILE *fd, const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
@@ -936,6 +942,9 @@ int usage() {
            "set target.so target-function new value : \n"
            "# ./hookso setfunc pid target-so target-func value \n"
            "\n"
+           "find target.so target-function : \n"
+           "# ./hookso find pid target-so target-func \n"
+           "\n"
     );
     return -1;
 }
@@ -1019,7 +1028,7 @@ int program_dlclose(int argc, char **argv) {
         return -1;
     }
 
-    LOG("remove so file %lu ok", handle);
+    INFO("remove so file ok handle=%lu", handle);
 
     return 0;
 }
@@ -1046,7 +1055,7 @@ int program_dlopen(int argc, char **argv) {
         return -1;
     }
 
-    LOG("inject so file %s ok", targetso.c_str());
+    INFO("inject so file %s ok handle=%lu", targetso.c_str(), handle);
 
     return 0;
 }
@@ -1121,7 +1130,7 @@ int program_dlcall(int argc, char **argv) {
         return -1;
     }
 
-    LOG("dlcall %s %s ok ret=%d", soname.c_str(), targetfunc.c_str(), retval);
+    INFO("dlcall %s %s ok ret=%d", soname.c_str(), targetfunc.c_str(), retval);
 
     return 0;
 }
@@ -1169,7 +1178,7 @@ int program_call(int argc, char **argv) {
         return -1;
     }
 
-    LOG("call %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
+    INFO("call %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
 
     return 0;
 }
@@ -1210,7 +1219,39 @@ int program_syscall(int argc, char **argv) {
         return -1;
     }
 
-    LOG("syscall %d ok ret=%d", syscallno, retval);
+    INFO("syscall %d ok ret=%d", syscallno, retval);
+
+    return 0;
+}
+
+int program_find(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    void *old_funcaddr_plt = 0;
+    void *old_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
+
+    INFO("%s %s=%p %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, (uint64_t) old_funcaddr);
 
     return 0;
 }
@@ -1259,7 +1300,7 @@ int program_setfunc(int argc, char **argv) {
         }
 
         LOG("set text func %s %s ok from %p to %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, value);
-        LOG("old func backup=%lu", backup);
+        INFO("old func backup=%lu", backup);
     } else {
         // func out .so
         void *new_funcaddr = (void *) value;
@@ -1269,7 +1310,7 @@ int program_setfunc(int argc, char **argv) {
         }
 
         LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr, new_funcaddr);
-        LOG("old func backup=%lu", (uint64_t) old_funcaddr);
+        INFO("old func backup=%lu", (uint64_t) old_funcaddr);
     }
 
     return 0;
@@ -1361,7 +1402,7 @@ int program_replace(int argc, char **argv) {
 
         LOG("replace text func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
             soname.c_str(), targetfunc.c_str(), new_funcaddr);
-        LOG("old func backup=%lu", backup);
+        INFO("old func backup=%lu", backup);
     } else {
         // func out .so
         ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
@@ -1372,7 +1413,7 @@ int program_replace(int argc, char **argv) {
 
         LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
             soname.c_str(), targetfunc.c_str(), new_funcaddr);
-        LOG("old func backup=%lu", (uint64_t) old_funcaddr);
+        INFO("old func backup=%lu", (uint64_t) old_funcaddr);
     }
 
     return 0;
@@ -1475,12 +1516,19 @@ int main(int argc, char **argv) {
         ret = program_dlcall(argc, argv);
     } else if (type == "setfunc") {
         ret = program_setfunc(argc, argv);
+    } else if (type == "find") {
+        ret = program_find(argc, argv);
     } else {
         usage();
         ret = -1;
     }
 
-    ret = fini_hookso_env(pid);
+    if (ret < 0) {
+        fini_hookso_env(pid);
+    } else {
+        ret = fini_hookso_env(pid);
+    }
+
     if (ret < 0) {
         return -1;
     }
