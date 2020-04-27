@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: make
+    - uses: actions/checkout@v2
+    - name: build
       run: |
         ./build.sh
         cd test
