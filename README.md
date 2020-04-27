@@ -173,7 +173,7 @@ putsnew libtest 3318
 putsnew libtest 3319
 putsnew libtest 3320
 ```
-现在开始，libtest.so调用puts函数，就变成了调用libtestnew.so的putsnew函数了
+现在开始，libtest.so内部调用puts函数，就变成了调用libtestnew.so的putsnew函数了，libtest.so之外调用puts函数，还是以前的没有变
 
 * 示例7：让test的libtest.so的puts函数，恢复到之前，这里的140573454638880就是之前示例6 replace输出的backup旧值
 ```
@@ -209,6 +209,7 @@ libtestnew 31721
 libtestnew 31722
 libtestnew 31723
 ```
+现在整个进程所有调用libtest的地方，都跳转到了libtestnew函数
 
 * 示例9：让test的libtest.so的libtest函数，恢复到之前，这里的10442863786053945429就是之前示例8 replace输出的backup旧值
 ```
