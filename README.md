@@ -75,7 +75,7 @@ libtest 10
 # ./hookso syscall 11234 1 i=1 s="haha" i=4
 [INFO][2020.4.27,21:53:37,154]main.cpp:1222,program_syscall: syscall 1 ok ret=4
 ```
-然后观察test的输出，可以看到haha输出
+注意这里的输出ret=4，表示是系统调用的返回值。然后观察test的输出，可以看到haha输出
 ```
 libtest 12699
 libtest 12700
@@ -92,7 +92,7 @@ libtest 12703
 # ./hookso call 11234 libtest.so libtest i=1234
 [INFO][2020.4.27,21:55:35,964]main.cpp:1181,program_call: call libtest.so libtest ok ret=0
 ```
-然后观察test的输出，可以看到输出
+这里的参数和返回值，和示例1 syscall同理。然后观察test的输出，可以看到输出
 ```
 libtest 12713
 libtest 12714
@@ -239,3 +239,5 @@ libtest 32
 因为东西简单，减少无谓的封装，增加可读性
 ###### 这东西实际有什么作用？
 典型的用法是来监控某些进程的底层函数，打打日志，不用修改原始代码。或者拿来做c++的热更新补丁也可以
+###### 有什么局限性？
+syscall、call、dlcall只支持最大6个参数的函数调用，并且参数只能支持整形、字符、浮点。replace不受限制，但是必须确保新的函数和旧函数，参数一致，不然会core掉
