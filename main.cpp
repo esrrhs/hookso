@@ -44,6 +44,8 @@
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
+//#define DEBUG_LOG
+
 #ifdef DEBUG_LOG
 #define LOG(...) log(stdout, "[DEBUG]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #else
