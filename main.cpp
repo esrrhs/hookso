@@ -52,7 +52,6 @@
 #else
 #define LOG(...)
 #endif
-#define INFO(...) log(stdout, "[INFO]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define ERR(...) log(stderr, "[ERROR]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 void log(FILE *fd, const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
@@ -1307,7 +1306,7 @@ int program_dlclose(int argc, char **argv) {
         return -1;
     }
 
-    INFO("remove so file ok handle=%lu", handle);
+    printf("%lu\n", handle);
 
     return 0;
 }
@@ -1334,7 +1333,7 @@ int program_dlopen(int argc, char **argv) {
         return -1;
     }
 
-    INFO("inject so file %s ok handle=%lu", targetso.c_str(), handle);
+    printf("%lu\n", handle);
 
     return 0;
 }
@@ -1399,7 +1398,7 @@ int program_dlcall(int argc, char **argv) {
         return -1;
     }
 
-    INFO("dlcall %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
+    printf("%d\n", retval);
 
     return 0;
 }
@@ -1447,7 +1446,7 @@ int program_call(int argc, char **argv) {
         return -1;
     }
 
-    INFO("call %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
+    printf("%d\n", retval);
 
     return 0;
 }
@@ -1488,7 +1487,7 @@ int program_syscall(int argc, char **argv) {
         return -1;
     }
 
-    INFO("syscall %d ok ret=%d", syscallno, retval);
+    printf("%d\n", retval);
 
     return 0;
 }
@@ -1520,7 +1519,7 @@ int program_find(int argc, char **argv) {
 
     LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
 
-    INFO("%s %s=%p %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, (uint64_t) old_funcaddr);
+    printf("%p\t%lu\n", old_funcaddr, (uint64_t) old_funcaddr);
 
     return 0;
 }
@@ -1569,7 +1568,7 @@ int program_setfunc(int argc, char **argv) {
         }
 
         LOG("set text func %s %s ok from %p to %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, value);
-        INFO("old func backup=%lu", backup);
+        printf("%lu\n", backup);
     } else {
         // func out .so
         void *new_funcaddr = (void *) value;
@@ -1579,7 +1578,7 @@ int program_setfunc(int argc, char **argv) {
         }
 
         LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr, new_funcaddr);
-        INFO("old func backup=%lu", (uint64_t) old_funcaddr);
+        printf("%lu\n", (uint64_t) old_funcaddr);
     }
 
     return 0;
@@ -1661,7 +1660,7 @@ int program_replace(int argc, char **argv) {
 
         LOG("replace text func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
             targetso.c_str(), targetfunc.c_str(), new_funcaddr);
-        INFO("old func backup=%lu", backup);
+        printf("%lu\t%lu\n", handle, backup);
     } else {
         // func out .so
         ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
@@ -1672,7 +1671,7 @@ int program_replace(int argc, char **argv) {
 
         LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
             targetso.c_str(), targetfunc.c_str(), new_funcaddr);
-        INFO("old func backup=%lu", (uint64_t) old_funcaddr);
+        printf("%lu\t%lu\n", handle, (uint64_t) old_funcaddr);
     }
 
     return 0;
