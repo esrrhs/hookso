@@ -239,7 +239,18 @@ libtest 32
 因为东西简单，减少无谓的封装，增加可读性
 ###### 这东西实际有什么作用？
 典型的用法是来监控某些进程的底层函数，打打日志，不用修改原始代码。或者拿来做c++的热更新补丁也可以
-###### 有什么局限性？
+###### 函数调用有什么限制？
 syscall、call、dlcall只支持最大6个参数的函数调用，并且参数只能支持整形、字符、浮点  
-replace不受限制，但是必须确保新的函数和旧函数，参数一致，不然会core掉  
-某些so太大无法被全部load进内存，导致无法解析，如/usr/local/lib64/libstdc++.so.6.0.28
+replace不受限制，但是必须确保新的函数和旧函数，参数一致，不然会core掉
+###### 有些so的函数会报错？
+某些so太大无法被全部load进内存，导致无法解析，运行失败，如
+```
+# ./hookso find 11234 libstdc++.so.6.0.28 __dynamic_cast                 
+[ERROR][2020.4.28,14:26:55,161]main.cpp:172,remote_process_read: remote_process_read fail 0x7fc375714760 5 Input/output error
+```
+把so参数修改成文件路径，这样就会从文件读取so信息
+```
+# ./hookso find 11234 /usr/local/lib64/libstdc++.so.6.0.28 __dynamic_cast
+[INFO][2020.4.28,14:26:47,274]main.cpp:1529,program_find: /usr/local/lib64/libstdc++.so.6.0.28 __dynamic_cast=0x7fc37475cea0 140477449227936
+```
+可以看到，find命令已成功执行，对于其他的命令如call、dlopen、replace同理
