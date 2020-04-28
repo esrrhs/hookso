@@ -39,6 +39,7 @@
 #include <sys/user.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
 
 #define PROCMAPS_LINE_MAX_LENGTH (PATH_MAX + 100)
 
@@ -268,9 +269,9 @@ int remote_process_write(int remote_pid, void *address, void *buffer, size_t len
     return ret;
 }
 
-int find_so_func_addr(int pid, const std::string &soname,
-                      const std::string &funcname,
-                      void *&funcaddr_plt, void *&funcaddr) {
+int find_so_func_addr_by_mem(int pid, const std::string &soname,
+                             const std::string &funcname,
+                             void *&funcaddr_plt, void *&funcaddr) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -509,6 +510,288 @@ int find_so_func_addr(int pid, const std::string &soname,
     funcaddr = func;
 
     return 0;
+}
+
+int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
+                              const std::string &funcname,
+                              void *&funcaddr_plt, void *&funcaddr, int sofd) {
+
+    int pos = targetsopath.find_last_of("/");
+    if (pos == -1) {
+        ERR("target so invalid %s", targetsopath.c_str());
+        return -1;
+    }
+    std::string soname = targetsopath.substr(pos + 1);
+    soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
+        return !std::isspace(ch);
+    }).base(), soname.end());
+
+    char maps_path[PATH_MAX];
+    sprintf(maps_path, "/proc/%d/maps", pid);
+    FILE *fd = fopen(maps_path, "r");
+    if (!fd) {
+        ERR("cannot open the memory maps, %s", strerror(errno));
+        return -1;
+    }
+
+    std::string sobeginstr;
+    char buf[PROCMAPS_LINE_MAX_LENGTH];
+    while (!feof(fd)) {
+        if (fgets(buf, PROCMAPS_LINE_MAX_LENGTH, fd) == NULL) {
+            break;
+        }
+
+        std::vector <std::string> tmp;
+
+        const char *sep = "\t \r\n";
+        char *line = NULL;
+        for (char *token = strtok_r(buf, sep, &line); token != NULL; token = strtok_r(NULL, sep, &line)) {
+            tmp.push_back(token);
+        }
+
+        if (tmp.empty()) {
+            continue;
+        }
+
+        std::string path = tmp[tmp.size() - 1];
+        if (path == "(deleted)") {
+            if (tmp.size() < 2) {
+                continue;
+            }
+            path = tmp[tmp.size() - 2];
+        }
+
+        int pos = path.find_last_of("/");
+        if (pos == -1) {
+            continue;
+        }
+        std::string targetso = path.substr(pos + 1);
+        targetso.erase(std::find_if(targetso.rbegin(), targetso.rend(), [](int ch) {
+            return !std::isspace(ch);
+        }).base(), targetso.end());
+        if (targetso == soname) {
+            sobeginstr = tmp[0];
+            pos = sobeginstr.find_last_of("-");
+            if (pos == -1) {
+                fclose(fd);
+                ERR("parse /proc/%d/maps %s fail", pid, soname.c_str());
+                return -1;
+            }
+            sobeginstr = sobeginstr.substr(0, pos);
+            break;
+        }
+    }
+
+    fclose(fd);
+
+    if (sobeginstr.empty()) {
+        ERR("find /proc/%d/maps %s fail", pid, soname.c_str());
+        return -1;
+    }
+
+    uint64_t sobeginvalue = std::strtoul(sobeginstr.c_str(), 0, 16);
+
+    LOG("find target so, begin with 0x%s %lu", sobeginstr.c_str(), sobeginvalue);
+
+    Elf64_Ehdr targetso;
+    int ret = remote_process_read(pid, (void *) sobeginvalue, &targetso, sizeof(targetso));
+    if (ret != 0) {
+        return -1;
+    }
+
+    if (targetso.e_ident[EI_MAG0] != ELFMAG0 ||
+        targetso.e_ident[EI_MAG1] != ELFMAG1 ||
+        targetso.e_ident[EI_MAG2] != ELFMAG2 ||
+        targetso.e_ident[EI_MAG3] != ELFMAG3) {
+        ERR("not valid elf header /proc/%d/maps %lu ", pid, sobeginvalue);
+        return -1;
+    }
+
+    LOG("read head ok %lu", sobeginvalue);
+    LOG("section offset %lu", targetso.e_shoff);
+    LOG("section num %d", targetso.e_shnum);
+    LOG("section size %d", targetso.e_shentsize);
+    LOG("section header string table index %d", targetso.e_shstrndx);
+
+    struct stat st;
+    ret = fstat(sofd, &st);
+    if (ret < 0) {
+        ERR("fstat fail /proc/%d/maps %s", pid, targetsopath.c_str());
+        return -1;
+    }
+
+    int sofilelen = st.st_size;
+    LOG("so file len %d %s", targetsopath.c_str(), sofilelen);
+
+    char *sofileaddr = (char *) mmap(NULL, sofilelen, PROT_READ, MAP_PRIVATE, sofd, 0);
+    if (sofileaddr == MAP_FAILED) {
+        ERR("mmap fail /proc/%d/maps %s", pid, targetsopath.c_str());
+        return -1;
+    }
+
+    if (memcmp(sofileaddr, &targetso, sizeof(targetso)) != 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("mmap diff /proc/%d/maps %s", pid, targetsopath.c_str());
+        return -1;
+    }
+
+    Elf64_Shdr setions[targetso.e_shnum];
+    memcpy(&setions, sofileaddr + targetso.e_shoff, sizeof(setions));
+
+    Elf64_Shdr &shsection = setions[targetso.e_shstrndx];
+    LOG("section header string table offset %ld", shsection.sh_offset);
+    LOG("section header string table size %ld", shsection.sh_size);
+
+    char shsectionname[shsection.sh_size];
+    memcpy(shsectionname, sofileaddr + shsection.sh_offset, sizeof(shsectionname));
+
+    int pltindex = -1;
+    int dynsymindex = -1;
+    int dynstrindex = -1;
+    int relapltindex = -1;
+    for (int i = 0; i < targetso.e_shnum; ++i) {
+        Elf64_Shdr &s = setions[i];
+        std::string name = &shsectionname[s.sh_name];
+        if (name == ".plt") {
+            pltindex = i;
+        }
+        if (name == ".dynsym") {
+            dynsymindex = i;
+        }
+        if (name == ".dynstr") {
+            dynstrindex = i;
+        }
+        if (name == ".rela.plt") {
+            relapltindex = i;
+        }
+    }
+
+    if (pltindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find .plt %s", soname.c_str());
+        return -1;
+    }
+    if (dynsymindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find .dynsym %s", soname.c_str());
+        return -1;
+    }
+    if (dynstrindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find .dynstr %s", soname.c_str());
+        return -1;
+    }
+    if (relapltindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find .rel.plt %s", soname.c_str());
+        return -1;
+    }
+
+    Elf64_Shdr &pltsection = setions[pltindex];
+    LOG("plt index %d", pltindex);
+    LOG("plt section offset %ld", pltsection.sh_offset);
+    LOG("plt section size %ld", pltsection.sh_size);
+
+    Elf64_Shdr &dynsymsection = setions[dynsymindex];
+    LOG("dynsym index %d", dynsymindex);
+    LOG("dynsym section offset %ld", dynsymsection.sh_offset);
+    LOG("dynsym section size %ld", dynsymsection.sh_size / sizeof(Elf64_Sym));
+
+    Elf64_Sym sym[dynsymsection.sh_size / sizeof(Elf64_Sym)];
+    memcpy(&sym, sofileaddr + dynsymsection.sh_offset, sizeof(sym));
+
+    Elf64_Shdr &dynstrsection = setions[dynstrindex];
+    LOG("dynstr index %d", dynstrindex);
+    LOG("dynstr section offset %ld", dynstrsection.sh_offset);
+    LOG("dynstr section size %ld", dynstrsection.sh_size);
+
+    char dynstr[dynstrsection.sh_size];
+    memcpy(dynstr, sofileaddr + dynstrsection.sh_offset, sizeof(dynstr));
+
+    int symfuncindex = -1;
+    for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
+        Elf64_Sym &s = sym[j];
+        std::string name = &dynstr[s.st_name];
+        if (name == funcname) {
+            symfuncindex = j;
+            break;
+        }
+    }
+
+    if (symfuncindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find %s in .dynsym %s", funcname.c_str(), soname.c_str());
+        return -1;
+    }
+
+    Elf64_Sym &targetsym = sym[symfuncindex];
+    if (targetsym.st_shndx != SHN_UNDEF && targetsym.st_value != 0 && targetsym.st_size != 0) {
+        Elf64_Shdr &s = setions[targetsym.st_shndx];
+        std::string name = &shsectionname[s.sh_name];
+        if (name == ".text") {
+            munmap(sofileaddr, sofilelen);
+            void *func = (void *) (sobeginvalue + targetsym.st_value);
+            LOG("target text func addr %p", func);
+            funcaddr_plt = 0;
+            funcaddr = func;
+            return 0;
+        }
+    }
+
+    Elf64_Shdr &relapltsection = setions[relapltindex];
+    LOG("relaplt index %d", relapltindex);
+    LOG("relaplt section offset %ld", relapltsection.sh_offset);
+    LOG("relaplt section size %ld", relapltsection.sh_size / sizeof(Elf64_Rela));
+
+    Elf64_Rela rela[relapltsection.sh_size / sizeof(Elf64_Rela)];
+    memcpy(&rela, sofileaddr + relapltsection.sh_offset, sizeof(rela));
+
+    int relafuncindex = -1;
+    for (int j = 0; j < (int) (relapltsection.sh_size / sizeof(Elf64_Rela)); ++j) {
+        Elf64_Rela &r = rela[j];
+        if ((int) ELF64_R_SYM(r.r_info) == symfuncindex) {
+            relafuncindex = j;
+            break;
+        }
+    }
+
+    if (relafuncindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
+        return -1;
+    }
+
+    Elf64_Rela &relafunc = rela[relafuncindex];
+    LOG("target rela index %d", relafuncindex);
+    LOG("target rela addr %ld", relafunc.r_offset);
+
+    void *func;
+    ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+    if (ret != 0) {
+        munmap(sofileaddr, sofilelen);
+        return -1;
+    }
+
+    LOG("target got.plt func old addr %p", func);
+
+    funcaddr_plt = (void *) (sobeginvalue + relafunc.r_offset);
+    funcaddr = func;
+
+    munmap(sofileaddr, sofilelen);
+
+    return 0;
+}
+
+int find_so_func_addr(int pid, const std::string &so,
+                      const std::string &funcname,
+                      void *&funcaddr_plt, void *&funcaddr) {
+
+    int sofd = open(so.c_str(), O_RDONLY);
+    if (sofd == -1) {
+        return find_so_func_addr_by_mem(pid, so, funcname, funcaddr_plt, funcaddr);
+    } else {
+        return find_so_func_addr_by_file(pid, so, funcname, funcaddr_plt, funcaddr, sofd);
+    }
 }
 
 int find_libc_name(int pid, std::string &name, void *&psostart) {
@@ -1097,24 +1380,14 @@ int program_dlcall(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    int pos = targetso.find_last_of("/");
-    if (pos == -1) {
-        ERR("target so invalid %s", targetso.c_str());
-        return -1;
-    }
-    std::string soname = targetso.substr(pos + 1);
-    soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
-        return !std::isspace(ch);
-    }).base(), soname.end());
-
     void *target_funcaddr_plt = 0;
     void *target_funcaddr = 0;
-    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
+    ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
         return -1;
     }
 
-    LOG("start call so file %s %s", soname.c_str(), targetfunc.c_str());
+    LOG("start call so file %s %s", targetso.c_str(), targetfunc.c_str());
 
     uint64_t retval = 0;
     ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
@@ -1125,14 +1398,14 @@ int program_dlcall(int argc, char **argv) {
         return -1;
     }
 
-    LOG("start close so file %s %s", soname.c_str(), targetfunc.c_str());
+    LOG("start close so file %s %s", targetso.c_str(), targetfunc.c_str());
 
     ret = close_so(pid, handle);
     if (ret != 0) {
         return -1;
     }
 
-    INFO("dlcall %s %s ok ret=%d", soname.c_str(), targetfunc.c_str(), retval);
+    INFO("dlcall %s %s ok ret=%d", targetso.c_str(), targetfunc.c_str(), retval);
 
     return 0;
 }
@@ -1359,27 +1632,17 @@ int program_replace(int argc, char **argv) {
 
     LOG("inject so file %s ok", targetso.c_str());
 
-    int pos = targetso.find_last_of("/");
-    if (pos == -1) {
-        ERR("target so invalid %s", targetso.c_str());
-        return -1;
-    }
-    std::string soname = targetso.substr(pos + 1);
-    soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
-        return !std::isspace(ch);
-    }).base(), soname.end());
-
-    LOG("start parse so file %s %s", soname.c_str(), targetfunc.c_str());
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
     void *new_funcaddr_plt = 0;
     void *new_funcaddr = 0;
-    ret = find_so_func_addr(pid, soname.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
+    ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
     if (ret != 0) {
         close_so(pid, handle);
         return -1;
     }
 
-    LOG("new %s %s=%p offset=%p", soname.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
+    LOG("new %s %s=%p offset=%p", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
 
     if (old_funcaddr_plt == 0) {
         // func in .so
@@ -1403,7 +1666,7 @@ int program_replace(int argc, char **argv) {
         }
 
         LOG("replace text func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
-            soname.c_str(), targetfunc.c_str(), new_funcaddr);
+            targetso.c_str(), targetfunc.c_str(), new_funcaddr);
         INFO("old func backup=%lu", backup);
     } else {
         // func out .so
@@ -1414,7 +1677,7 @@ int program_replace(int argc, char **argv) {
         }
 
         LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
-            soname.c_str(), targetfunc.c_str(), new_funcaddr);
+            targetso.c_str(), targetfunc.c_str(), new_funcaddr);
         INFO("old func backup=%lu", (uint64_t) old_funcaddr);
     }
 
