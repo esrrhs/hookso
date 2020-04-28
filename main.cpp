@@ -1207,10 +1207,10 @@ int usage() {
            "eg:\n"
            "\n"
            "do syscall: \n"
-           "# ./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso syscall pid syscall-number i=int-param1 s=\"string-param2\" \n"
            "\n"
            "call .so function: \n"
-           "# ./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso call pid target-so target-func i=int-param1 s=\"string-param2\" \n"
            "\n"
            "dlopen .so: \n"
            "# ./hookso dlopen pid target-so-path \n"
@@ -1219,7 +1219,7 @@ int usage() {
            "# ./hookso dlclose pid handle \n"
            "\n"
            "open .so and call function and close: \n"
-           "# ./hookso dlcall pid target-so-path target-func i=int-param1 s=\"string-param2\" f=float-param3 \n"
+           "# ./hookso dlcall pid target-so-path target-func i=int-param1 s=\"string-param2\" \n"
            "\n"
            "replace src.so old-function to target.so new-function: \n"
            "# ./hookso replace pid src-so src-func target-so-path target-func \n"
@@ -1238,13 +1238,7 @@ int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
 
     // i=1234
     if (arg[0] == 'i') {
-        retval = atoi(arg.substr(2).c_str());
-        return 0;
-    }
-
-    // f=1234.44
-    if (arg[0] == 'f') {
-        retval = atoi(arg.c_str());
+        retval = std::stoull(arg.substr(2).c_str());
         return 0;
     }
 
