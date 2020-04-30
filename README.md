@@ -251,6 +251,6 @@ replace不受限制，但是必须确保新的函数和旧函数，参数一致�
 把so参数修改成文件路径，这样就会从文件读取so信息
 ```
 # ./hookso find 11234 /usr/local/lib64/libstdc++.so.6.0.28 __dynamic_cast
-[INFO][2020.4.28,14:26:47,274]main.cpp:1529,program_find: /usr/local/lib64/libstdc++.so.6.0.28 __dynamic_cast=0x7fc37475cea0 140477449227936
+0x7fc37475cea0   140477449227936
 ```
 可以看到，find命令已成功执行，对于其他的命令如call、dlopen、replace同理
