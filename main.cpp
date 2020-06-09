@@ -1730,8 +1730,8 @@ int ini_hookso_env(int pid) {
 
 int fini_hookso_env(int pid) {
 
-    for (auto&[ptr, len]: gallocmem) {
-        free_so_string_mem(pid, (void *) ptr, len);
+    for (const auto& kv : gallocmem) {
+        free_so_string_mem(pid, (void *) kv.first, kv.second);
     }
 
     uint64_t retval = 0;
