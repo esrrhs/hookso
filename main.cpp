@@ -35,7 +35,6 @@
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <regex>
 #include <sys/user.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
@@ -793,6 +792,16 @@ int find_so_func_addr(int pid, const std::string &so,
     }
 }
 
+bool ends_with(const std::string& str, const std::string& suffix)
+{
+    return str.size() >= suffix.size() && 0 == str.compare(str.size()-suffix.size(), suffix.size(), suffix);
+}
+
+bool starts_with(const std::string& str, const std::string& prefix)
+{
+    return str.size() >= prefix.size() && 0 == str.compare(0, prefix.size(), prefix);
+}
+
 int find_libc_name(int pid, std::string &name, void *&psostart) {
 
     char maps_path[PATH_MAX];
@@ -803,7 +812,6 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
         return -1;
     }
 
-    std::regex libc_regex("libc-(.*).so");
     name = "";
     std::string sobeginstr;
 
@@ -842,7 +850,7 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
             return !std::isspace(ch);
         }).base(), targetso.end());
 
-        if (std::regex_search(targetso, libc_regex)) {
+        if (starts_with(targetso, "libc-") && ends_with(targetso, ".so")) {
             name = targetso;
             sobeginstr = tmp[0];
             pos = sobeginstr.find_last_of("-");
