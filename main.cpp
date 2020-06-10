@@ -1204,6 +1204,11 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     LOG("inject so %s ok handle=%lu", abspath, retval);
     handle = retval;
 
+    if (handle == 0) {
+        ERR("dlopen %s fail", sopath.c_str());
+        return -1;
+    }
+
     return 0;
 }
 
