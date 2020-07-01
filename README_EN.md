@@ -238,6 +238,15 @@ libtest 32
 ```
 0x7fd9cfb91668 is the address, 140573469644392 is the value of the address converted to uint64_t
 
+* Example 11: Find the passed parameter of test libtest.so
+```
+# ./hookso arg 11234 libtest.so libtest 1
+35
+# ./hookso arg 11234 libtest.so libtest 1
+36
+```
+The last parameter 1 represents the first parameter, because test is looping +1, so the parameters passed into the libtest function are changing every time
+
 # QA
 ##### Why is there a main.cpp of 1500 lines?
 Because things are simple, reduce unnecessary packaging, increase readability
