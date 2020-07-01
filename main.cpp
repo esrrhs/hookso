@@ -513,13 +513,11 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
 int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
                               const std::string &funcname,
                               void *&funcaddr_plt, void *&funcaddr, int sofd) {
-
+    std::string soname = targetsopath;
     int pos = targetsopath.find_last_of("/");
-    if (pos == -1) {
-        ERR("target so invalid %s", targetsopath.c_str());
-        return -1;
+    if (pos != -1) {
+        soname = targetsopath.substr(pos + 1);
     }
-    std::string soname = targetsopath.substr(pos + 1);
     soname.erase(std::find_if(soname.rbegin(), soname.rend(), [](int ch) {
         return !std::isspace(ch);
     }).base(), soname.end());
