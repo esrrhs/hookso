@@ -619,7 +619,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     }
 
     int sofilelen = st.st_size;
-    LOG("so file len %d %s", targetsopath.c_str(), sofilelen);
+    LOG("so file len %s %d", targetsopath.c_str(), sofilelen);
 
     char *sofileaddr = (char *) mmap(NULL, sofilelen, PROT_READ, MAP_PRIVATE, sofd, 0);
     if (sofileaddr == MAP_FAILED) {
@@ -1374,7 +1374,7 @@ int program_dlcall(int argc, char **argv) {
         if (ret != 0) {
             return -1;
         }
-        LOG("parse %d arg %d", i - 4, arg[i - 5]);
+        LOG("parse %d arg %lu", i - 4, arg[i - 5]);
     }
 
     LOG("start inject so file %s %s", targetso.c_str(), targetfunc.c_str());
