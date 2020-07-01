@@ -792,13 +792,11 @@ int find_so_func_addr(int pid, const std::string &so,
     }
 }
 
-bool ends_with(const std::string& str, const std::string& suffix)
-{
-    return str.size() >= suffix.size() && 0 == str.compare(str.size()-suffix.size(), suffix.size(), suffix);
+bool ends_with(const std::string &str, const std::string &suffix) {
+    return str.size() >= suffix.size() && 0 == str.compare(str.size() - suffix.size(), suffix.size(), suffix);
 }
 
-bool starts_with(const std::string& str, const std::string& prefix)
-{
+bool starts_with(const std::string &str, const std::string &prefix) {
     return str.size() >= prefix.size() && 0 == str.compare(0, prefix.size(), prefix);
 }
 
@@ -1241,6 +1239,9 @@ int usage() {
            "\n"
            "find target.so target-function : \n"
            "# ./hookso find pid target-so target-func \n"
+           "\n"
+           "get target.so target-function call argument: \n"
+           "# ./hookso arg pid target-so target-func arg-index \n"
            "\n"
     );
     return -1;
@@ -1690,6 +1691,185 @@ int program_replace(int argc, char **argv) {
     return 0;
 }
 
+int grecoverpid;
+void *grecoverfuncaddr;
+uint64_t grecovercode;
+
+void backup_function(int sig) {
+    if (grecoverpid > 0) {
+        remote_process_write(grecoverpid, grecoverfuncaddr, &grecovercode, sizeof(grecovercode));
+    }
+    exit(0);
+}
+
+int program_arg(int argc, char **argv) {
+
+    if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    std::string argindexstr = argv[5];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+    LOG("arg index=%s", argindexstr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    int argindex = atoi(argindexstr.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    void *old_funcaddr_plt = 0;
+    void *old_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    uint64_t backup = 0;
+    ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("arg %s %s backup=%lu", targetso.c_str(), targetfunc.c_str(), backup);
+
+    struct user_regs_struct oldregs;
+    ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_GETREGS fail", pid);
+        return -1;
+    }
+
+    LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+    uint64_t newcode = 0;
+    char *code = (char *) &newcode;
+    // cc    : int3
+    code[0] = 0xcc;
+    // nop
+    memset(&code[1], 0x90, sizeof(code) - 1);
+
+    if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
+        (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(newcode)) {
+        ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
+            (uint64_t) oldregs.rip);
+        return -1;
+    }
+
+    ret = remote_process_write(pid, old_funcaddr, &newcode, sizeof(newcode));
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("set code=%lu", newcode);
+
+    ret = ptrace(PTRACE_CONT, pid, 0, 0);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_CONT fail", pid);
+        return -1;
+    }
+
+    grecoverpid = pid;
+    grecoverfuncaddr = old_funcaddr;
+    grecovercode = backup;
+    signal(SIGHUP, backup_function);
+    signal(SIGINT, backup_function);
+    signal(SIGQUIT, backup_function);
+    signal(SIGUSR1, backup_function);
+
+    int errsv = 0;
+    int status = 0;
+    while (1) {
+        ret = waitpid(pid, &status, 0);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ERR("waitpid error: %d %s", errno, strerror(errno));
+            errsv = errno;
+            break;
+        }
+
+        if (WIFSTOPPED(status)) {
+            if (WSTOPSIG(status) == SIGTRAP) {
+                // ok
+                break;
+            } else {
+                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
+                errsv = -1;
+                break;
+            }
+        } else if (WIFEXITED(status)) {
+            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
+            errsv = -1;
+            break;
+        } else if (WIFSIGNALED(status)) {
+            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
+            errsv = -1;
+            break;
+        } else {
+            ERR("unexpected waitpid status: 0x%x", status);
+            errsv = -1;
+            break;
+        }
+    }
+
+    grecoverpid = 0;
+    grecoverfuncaddr = 0;
+    grecovercode = 0;
+    signal(SIGHUP, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGUSR1, SIG_DFL);
+
+    struct user_regs_struct regs;
+    if (!errsv) {
+        ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            errsv = -1;
+        }
+    }
+
+    ret = remote_process_write(pid, old_funcaddr, &backup, sizeof(backup));
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("set back=%lu", backup);
+
+    if (errsv != 0) {
+        return -1;
+    }
+
+    LOG("get regs rip=%lu", (uint64_t) regs.rip);
+
+    regs.rip--;
+    ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        return -1;
+    }
+
+    uint64_t arg1 = regs.rdi;
+    uint64_t arg2 = regs.rsi;
+    uint64_t arg3 = regs.rdx;
+    uint64_t arg4 = regs.r10;
+    uint64_t arg5 = regs.r8;
+    uint64_t arg6 = regs.r9;
+    uint64_t args[6] = {arg1, arg2, arg3, arg4, arg5, arg6};
+    if (argindex >= 1 && argindex <= 6) {
+        printf("%lu\n", args[argindex - 1]);
+    }
+
+    return 0;
+}
+
 int ini_hookso_env(int pid) {
 
     LOG("start ini hookso env");
@@ -1743,7 +1923,7 @@ int ini_hookso_env(int pid) {
 
 int fini_hookso_env(int pid) {
 
-    for (const auto& kv : gallocmem) {
+    for (const auto &kv : gallocmem) {
         free_so_string_mem(pid, (void *) kv.first, kv.second);
     }
 
@@ -1789,6 +1969,8 @@ int main(int argc, char **argv) {
         ret = program_setfunc(argc, argv);
     } else if (type == "find") {
         ret = program_find(argc, argv);
+    } else if (type == "arg") {
+        ret = program_arg(argc, argv);
     } else {
         usage();
         ret = -1;
