@@ -16,6 +16,7 @@ hookso是一个linux动态链接库的注入修改查找工具，用来修改其
 * 把旧.so的函数替换为新.so的函数
 * 复原.so的函数替换
 * 查找.so的函数地址
+* 查看.so的函数参数
 
 # 编译
 git clone代码，运行脚本，生成hookso以及测试程序
@@ -240,6 +241,15 @@ libtest 32
 0x7fd9cfb91668  140573469644392
 ```
 0x7fd9cfb91668即为地址，140573469644392是地址转成了uint64_t的值
+
+* 示例11：查找test的libtest.so的传参
+```
+# ./hookso arg 11234 libtest.so libtest 1
+35
+# ./hookso arg 11234 libtest.so libtest 1
+36
+```
+最后一个参数1表示第1个参数，因为test是在循环+1，所以每次传入libtest函数的参数都在变化
 
 # QA
 ##### 为什么就一个1500行的main.cpp?
