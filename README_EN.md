@@ -248,7 +248,7 @@ libtest 32
 The last parameter 1 represents the first parameter, because test is looping +1, so the parameters passed into the libtest function are changing every time
 
 # QA
-##### Why is there a main.cpp of 1500 lines?
+##### Why is there a main.cpp of 1900+ lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
 The typical usage is to monitor the underlying functions of certain processes, log them, without modifying the original code. Or use it as a hot update patch for c ++
