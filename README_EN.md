@@ -271,4 +271,4 @@ As you can see, the find command has been successfully executed, the same is tru
 # Who is using
 [Lua's code coverage tool cLua](https://github.com/esrrhs/cLua)
 
-[Lua performance analysis tool cLua](https://github.com/esrrhs/pLua)
+[Lua performance analysis tool pLua](https://github.com/esrrhs/pLua)
