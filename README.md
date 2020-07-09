@@ -271,3 +271,8 @@ replace不受限制，但是必须确保新的函数和旧函数，参数一致�
 0x7fc37475cea0   140477449227936
 ```
 可以看到，find命令已成功执行，对于其他的命令如call、dlopen、replace同理
+
+# 应用
+[Lua的代码覆盖率工具 cLua](https://github.com/esrrhs/cLua)
+[Lua 性能分析工具 cLua](https://github.com/esrrhs/pLua)
+
