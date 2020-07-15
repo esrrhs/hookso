@@ -251,7 +251,7 @@ The last parameter 1 represents the first parameter, because test is looping +1,
 ##### Why is there a main.cpp of 1900+ lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
-The typical usage is to monitor the underlying functions of certain processes, log them, without modifying the original code. Or use it as a hot update patch for c ++
+Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions
 ##### What are the limitations of function calls?
 syscall, call, and dlcall only support function calls with a maximum of 6 parameters, and the parameters can only support integers and characters
 Replace is not limited, but you must ensure that the new function and the old function have the same parameters, otherwise they will core out
