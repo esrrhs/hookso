@@ -1700,26 +1700,7 @@ void backup_function(int sig) {
     exit(0);
 }
 
-int program_arg(int argc, char **argv) {
-
-    if (argc < 6) {
-        return usage();
-    }
-
-    std::string pidstr = argv[2];
-    std::string targetso = argv[3];
-    std::string targetfunc = argv[4];
-    std::string argindexstr = argv[5];
-
-    LOG("pid=%s", pidstr.c_str());
-    LOG("target so=%s", targetso.c_str());
-    LOG("target function=%s", targetfunc.c_str());
-    LOG("arg index=%s", argindexstr.c_str());
-
-    int pid = atoi(pidstr.c_str());
-    int argindex = atoi(argindexstr.c_str());
-
-    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+int wait_funccall_so(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t args[]) {
 
     void *old_funcaddr_plt = 0;
     void *old_funcaddr = 0;
@@ -1854,13 +1835,43 @@ int program_arg(int argc, char **argv) {
         return -1;
     }
 
-    uint64_t arg1 = regs.rdi;
-    uint64_t arg2 = regs.rsi;
-    uint64_t arg3 = regs.rdx;
-    uint64_t arg4 = regs.r10;
-    uint64_t arg5 = regs.r8;
-    uint64_t arg6 = regs.r9;
-    uint64_t args[6] = {arg1, arg2, arg3, arg4, arg5, arg6};
+    args[0] = regs.rdi;
+    args[1] = regs.rsi;
+    args[2] = regs.rdx;
+    args[3] = regs.r10;
+    args[4] = regs.r8;
+    args[5] = regs.r9;
+
+    return 0;
+}
+
+int program_arg(int argc, char **argv) {
+
+    if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    std::string argindexstr = argv[5];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+    LOG("arg index=%s", argindexstr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    int argindex = atoi(argindexstr.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    uint64_t args[6] = {0};
+    int ret = wait_funccall_so(pid, targetso, targetfunc, args);
+    if (ret < 0) {
+        return -1;
+    }
+
     if (argindex >= 1 && argindex <= 6) {
         printf("%lu\n", args[argindex - 1]);
     }
