@@ -1664,6 +1664,23 @@ int program_replace(int argc, char **argv) {
         code[0] = 0xe9;
         memcpy(&code[1], &offset, sizeof(offset));
 
+        // check
+        struct user_regs_struct oldregs;
+        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            return -1;
+        }
+
+        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
+            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
+            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
+                (uint64_t) oldregs.rip);
+            return -1;
+        }
+
         ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
         if (ret != 0) {
             close_so(pid, handle);
