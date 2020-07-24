@@ -1242,9 +1242,9 @@ int usage() {
            "# ./hookso arg pid target-so target-func arg-index \n"
            "\n"
            "before call target.so target-function, do syscall/call/dlcall with params: \n"
-           "# ./hookso trigger pid target-so target-func syscall syscall-number $1 i=int-param2 s=\"string-param3\" \n"
-           "# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func $1 i=int-param2 s=\"string-param3\" \n"
-           "# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func $1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
            "\n"
     );
     return -1;
@@ -1946,18 +1946,21 @@ int program_trigger(int argc, char **argv) {
 
     std::string trigger_targetso;
     std::string trigger_targetfunc;
+    int argstart = 0;
 
     if (calltype == "syscall") {
         if (argc < 7) {
             return usage();
         }
         trigger_syscallnostr = argv[6];
+        argstart = 7;
     } else if (calltype == "dlcall" || calltype == "call") {
         if (argc < 8) {
             return usage();
         }
         trigger_targetso = argv[6];
         trigger_targetfunc = argv[7];
+        argstart = 8;
     } else {
         ERR("calltype %s must be syscall/dlcall", calltype.c_str());
         return -1;
@@ -1972,23 +1975,23 @@ int program_trigger(int argc, char **argv) {
     }
 
     uint64_t arg[6] = {0};
-    for (int i = 8; i < argc; ++i) {
+    for (int i = argstart; i < argc; ++i) {
         std::string argstr = argv[i];
-        if (argstr[0] == '$') {
+        if (argstr[0] == '@') {
             int target_index = std::stoi(argstr.substr(1).c_str());
             if (target_index >= 1 && target_index <= 6) {
-                arg[i - 8] = target_args[target_index - 1];
+                arg[i - argstart] = target_args[target_index - 1];
             } else {
                 ERR("parse arg fail %s", argstr.c_str());
                 return -1;
             }
         } else {
-            ret = parse_arg_to_so(pid, argstr, arg[i - 8]);
+            ret = parse_arg_to_so(pid, argstr, arg[i - argstart]);
             if (ret != 0) {
                 return -1;
             }
         }
-        LOG("parse %d arg %d", i - 7, arg[i - 8]);
+        LOG("parse %d arg %d", i - 7, arg[i - argstart]);
     }
 
     if (calltype == "syscall") {
