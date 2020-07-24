@@ -17,6 +17,7 @@ hookso是一个linux动态链接库的注入修改查找工具，用来修改其
 * 复原.so的函数替换
 * 查找.so的函数地址
 * 查看.so的函数参数
+* 当执行.so的某个函数时，触发执行新的函数
 
 # 编译
 git clone代码，运行脚本，生成hookso以及测试程序
@@ -242,7 +243,7 @@ libtest 32
 ```
 0x7fd9cfb91668即为地址，140573469644392是地址转成了uint64_t的值
 
-* 示例11：查找test的libtest.so的传参
+* 示例11：查看libtest.so的libtest的传参值
 ```
 # ./hookso arg 11234 libtest.so libtest 1
 35
@@ -251,8 +252,50 @@ libtest 32
 ```
 最后一个参数1表示第1个参数，因为test是在循环+1，所以每次传入libtest函数的参数都在变化
 
+* 示例12：当执行libtest.so的libtest时，执行syscall，在屏幕上输出haha
+```
+./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
+4
+```
+然后观察test的输出，可以看到调用的输出
+```
+libtest 521
+libtest 522
+hahalibtest 523
+libtest 524
+```
+
+* 示例13：当执行libtest.so的libtest时，执行call，用相同的参数调用一次libtest函数
+```
+./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
+0
+```
+然后观察test的输出，可以看到输出了两次818
+```
+libtest 816
+libtest 817
+libtest 818
+libtest 818
+libtest 819
+libtest 820
+```
+
+* 示例14：当执行libtest.so的libtest时，执行dlcall，用相同的参数调用一次libtestnew.so的libtestnew函数
+```
+./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
+0
+```
+然后观察test的输出，可以看到输出了libtestnew的结果
+```
+libtest 972
+libtest 973
+libtestnew 974
+libtest 974
+libtest 975
+```
+
 # QA
-##### 为什么就一个1900行+的main.cpp?
+##### 为什么就一个2k行+的main.cpp?
 因为东西简单，减少无谓的封装，增加可读性
 ##### 这东西实际有什么作用？
 如同瑞士军刀一样，用处好很多。可以用来热更新，或者监控某些函数行为
