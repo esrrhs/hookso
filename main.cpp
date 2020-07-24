@@ -1241,6 +1241,10 @@ int usage() {
            "get target.so target-function call argument: \n"
            "# ./hookso arg pid target-so target-func arg-index \n"
            "\n"
+           "before call target.so target-function, do [syscall] or [dlcall] with params: \n"
+           "# ./hookso trigger pid target-so target-func syscall syscall-number $1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func $1 i=int-param2 s=\"string-param3\" \n"
+           "\n"
     );
     return -1;
 }
@@ -1350,30 +1354,7 @@ int program_dlopen(int argc, char **argv) {
     return 0;
 }
 
-int program_dlcall(int argc, char **argv) {
-
-    if (argc < 5) {
-        return usage();
-    }
-
-    std::string pidstr = argv[2];
-    std::string targetso = argv[3];
-    std::string targetfunc = argv[4];
-    LOG("pid=%s", pidstr.c_str());
-    LOG("target so=%s", targetso.c_str());
-    LOG("target function=%s", targetfunc.c_str());
-
-    int pid = atoi(pidstr.c_str());
-
-    uint64_t arg[6] = {0};
-    for (int i = 5; i < argc; ++i) {
-        std::string argstr = argv[i];
-        int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
-        if (ret != 0) {
-            return -1;
-        }
-        LOG("parse %d arg %lu", i - 4, arg[i - 5]);
-    }
+int program_dlcall_impl(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t arg[]) {
 
     LOG("start inject so file %s %s", targetso.c_str(), targetfunc.c_str());
 
@@ -1411,6 +1392,39 @@ int program_dlcall(int argc, char **argv) {
     }
 
     printf("%d\n", retval);
+
+    return 0;
+}
+
+int program_dlcall(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t arg[6] = {0};
+    for (int i = 5; i < argc; ++i) {
+        std::string argstr = argv[i];
+        int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
+        if (ret != 0) {
+            return -1;
+        }
+        LOG("parse %d arg %lu", i - 4, arg[i - 5]);
+    }
+
+    int ret = program_dlcall_impl(pid, targetso, targetfunc, arg);
+    if (ret < 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -1463,6 +1477,24 @@ int program_call(int argc, char **argv) {
     return 0;
 }
 
+int program_syscall_impl(int pid, int syscallno, uint64_t arg[]) {
+
+    LOG("start syscall %d %p %d", syscallno);
+
+    uint64_t retval = 0;
+    int ret = syscall_so(pid, retval, syscallno, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    printf("%d\n", retval);
+
+    return 0;
+}
+
 int program_syscall(int argc, char **argv) {
 
     if (argc < 4) {
@@ -1488,18 +1520,10 @@ int program_syscall(int argc, char **argv) {
 
     int syscallno = atoi(syscallnostr.c_str());
 
-    LOG("start syscall %d %p %d", syscallno);
-
-    uint64_t retval = 0;
-    int ret = syscall_so(pid, retval, syscallno, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    int ret = program_syscall_impl(pid, syscallno, arg);
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
-        return -1;
-    }
-
-    printf("%d\n", retval);
 
     return 0;
 }
@@ -1719,6 +1743,8 @@ void backup_function(int sig) {
 
 int wait_funccall_so(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t args[]) {
 
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
     void *old_funcaddr_plt = 0;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
@@ -1881,16 +1907,90 @@ int program_arg(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
     int argindex = atoi(argindexstr.c_str());
 
-    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
-
     uint64_t args[6] = {0};
     int ret = wait_funccall_so(pid, targetso, targetfunc, args);
-    if (ret < 0) {
+    if (ret != 0) {
         return -1;
     }
 
     if (argindex >= 1 && argindex <= 6) {
         printf("%lu\n", args[argindex - 1]);
+    }
+
+    return 0;
+}
+
+int program_trigger(int argc, char **argv) {
+
+    if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    std::string calltype = argv[5];
+
+    std::string trigger_syscallnostr;
+
+    std::string trigger_targetso;
+    std::string trigger_targetfunc;
+
+    if (calltype == "syscall") {
+        if (argc < 7) {
+            return usage();
+        }
+        trigger_syscallnostr = argv[6];
+    } else if (calltype == "dlcall") {
+        if (argc < 8) {
+            return usage();
+        }
+        trigger_targetso = argv[6];
+        trigger_targetfunc = argv[7];
+    } else {
+        ERR("calltype %s must be syscall/dlcall", calltype.c_str());
+        return -1;
+    }
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t target_args[6] = {0};
+    int ret = wait_funccall_so(pid, targetso, targetfunc, target_args);
+    if (ret != 0) {
+        return -1;
+    }
+
+    uint64_t arg[6] = {0};
+    for (int i = 8; i < argc; ++i) {
+        std::string argstr = argv[i];
+        if (argstr[0] == '$') {
+            int target_index = std::stoi(argstr.substr(1).c_str());
+            if (target_index >= 1 && target_index <= 6) {
+                arg[i - 8] = target_args[target_index - 1];
+            } else {
+                ERR("parse arg fail %s", argstr.c_str());
+                return -1;
+            }
+        } else {
+            ret = parse_arg_to_so(pid, argstr, arg[i - 8]);
+            if (ret != 0) {
+                return -1;
+            }
+        }
+        LOG("parse %d arg %d", i - 7, arg[i - 8]);
+    }
+
+    if (calltype == "syscall") {
+        int syscallno = atoi(trigger_syscallnostr.c_str());
+        ret = program_syscall_impl(pid, syscallno, arg);
+        if (ret != 0) {
+            return -1;
+        }
+    } else if (calltype == "dlcall") {
+        ret = program_dlcall_impl(pid, trigger_targetso, trigger_targetfunc, arg);
+        if (ret != 0) {
+            return -1;
+        }
     }
 
     return 0;
@@ -1975,7 +2075,7 @@ int main(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
 
     int ret = ini_hookso_env(pid);
-    if (ret < 0) {
+    if (ret != 0) {
         return -1;
     }
 
@@ -1997,18 +2097,20 @@ int main(int argc, char **argv) {
         ret = program_find(argc, argv);
     } else if (type == "arg") {
         ret = program_arg(argc, argv);
+    } else if (type == "trigger") {
+        ret = program_trigger(argc, argv);
     } else {
         usage();
         ret = -1;
     }
 
-    if (ret < 0) {
+    if (ret != 0) {
         fini_hookso_env(pid);
     } else {
         ret = fini_hookso_env(pid);
     }
 
-    if (ret < 0) {
+    if (ret != 0) {
         return -1;
     }
 
