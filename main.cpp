@@ -1241,8 +1241,9 @@ int usage() {
            "get target.so target-function call argument: \n"
            "# ./hookso arg pid target-so target-func arg-index \n"
            "\n"
-           "before call target.so target-function, do [syscall] or [dlcall] with params: \n"
+           "before call target.so target-function, do syscall/call/dlcall with params: \n"
            "# ./hookso trigger pid target-so target-func syscall syscall-number $1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func $1 i=int-param2 s=\"string-param3\" \n"
            "# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func $1 i=int-param2 s=\"string-param3\" \n"
            "\n"
     );
@@ -1429,6 +1430,31 @@ int program_dlcall(int argc, char **argv) {
     return 0;
 }
 
+int program_call_impl(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t arg[]) {
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    void *target_funcaddr_plt = 0;
+    void *target_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    uint64_t retval = 0;
+    ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    printf("%d\n", retval);
+
+    return 0;
+}
+
 int program_call(int argc, char **argv) {
 
     if (argc < 5) {
@@ -1454,25 +1480,10 @@ int program_call(int argc, char **argv) {
         LOG("parse %d arg %d", i - 4, arg[i - 5]);
     }
 
-    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
-
-    void *target_funcaddr_plt = 0;
-    void *target_funcaddr = 0;
-    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
+    int ret = program_call_impl(pid, targetso, targetfunc, arg);
     if (ret != 0) {
         return -1;
     }
-
-    uint64_t retval = 0;
-    ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
-    if (ret != 0) {
-        return -1;
-    }
-    if (retval == (uint64_t)(-1)) {
-        return -1;
-    }
-
-    printf("%d\n", retval);
 
     return 0;
 }
@@ -1941,7 +1952,7 @@ int program_trigger(int argc, char **argv) {
             return usage();
         }
         trigger_syscallnostr = argv[6];
-    } else if (calltype == "dlcall") {
+    } else if (calltype == "dlcall" || calltype == "call") {
         if (argc < 8) {
             return usage();
         }
@@ -1983,6 +1994,11 @@ int program_trigger(int argc, char **argv) {
     if (calltype == "syscall") {
         int syscallno = atoi(trigger_syscallnostr.c_str());
         ret = program_syscall_impl(pid, syscallno, arg);
+        if (ret != 0) {
+            return -1;
+        }
+    } else if (calltype == "call") {
+        ret = program_call_impl(pid, trigger_targetso, trigger_targetfunc, arg);
         if (ret != 0) {
             return -1;
         }
