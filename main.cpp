@@ -1114,8 +1114,7 @@ int alloc_so_string_mem(int pid, const std::string &str, void *&targetaddr, int 
     LOG("start syscall sys_mmap %d %d", str.length(), len);
 
     uint64_t retval = 0;
-    int ret = syscall_so(pid, retval, syscall_sys_mmap, 0, len, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN,
-                         -1, 0);
+    int ret = syscall_so(pid, retval, syscall_sys_mmap, 0, len, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ret != 0) {
         return -1;
     }
