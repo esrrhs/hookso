@@ -951,6 +951,13 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
+            } else if (WSTOPSIG(status) == SIGALRM) {
+                ret = ptrace(PTRACE_CONT, pid, 0, 0);
+                if (ret < 0) {
+                    ERR("ptrace %d PTRACE_CONT fail", pid);
+                    return -1;
+                }
+                continue;
             } else {
                 ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
                 errsv = -1;
@@ -1060,6 +1067,13 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
+            } else if (WSTOPSIG(status) == SIGALRM) {
+                ret = ptrace(PTRACE_CONT, pid, 0, 0);
+                if (ret < 0) {
+                    ERR("ptrace %d PTRACE_CONT fail", pid);
+                    return -1;
+                }
+                continue;
             } else {
                 ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
                 errsv = -1;
@@ -1831,6 +1845,13 @@ int wait_funccall_so(int pid, const std::string &targetso, const std::string &ta
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
+            } else if (WSTOPSIG(status) == SIGALRM) {
+                ret = ptrace(PTRACE_CONT, pid, 0, 0);
+                if (ret < 0) {
+                    ERR("ptrace %d PTRACE_CONT fail", pid);
+                    return -1;
+                }
+                continue;
             } else {
                 ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
                 errsv = -1;
