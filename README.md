@@ -40,12 +40,25 @@ while (1) {
     sleep(1);
 }
 ```
-而libtest.so的libtest函数只是打印到标准输出
+而libtest.so的libtest函数只是打印到标准输出。
+
+注意这里使用了几种不同的方式调用puts，原因是不同的写法，会导致puts在elf中的位置不太一样，这里使用多种写法，使得后面的查找替换都能够覆盖到。具体可以```readelf -r libtest.so```查看细节。
 ```
+typedef int (*PutsFunc)(const char *s);
+
+PutsFunc f = &puts;
+
 extern "C" bool libtest(int n) {
     char buff[128] = {0};
     snprintf(buff, sizeof(buff), "libtest %d", n);
-    puts(buff);
+    if (n % 3 == 0) {
+        puts(buff);
+    } else if (n % 3 == 1) {
+        f(buff);
+    } else {
+        PutsFunc ff = &puts;
+        ff(buff);
+    }
     return false;
 }
 ```
