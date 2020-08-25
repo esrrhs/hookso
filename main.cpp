@@ -269,7 +269,7 @@ int remote_process_write(int remote_pid, void *address, void *buffer, size_t len
 
 int find_so_func_addr_by_mem(int pid, const std::string &soname,
                              const std::string &funcname,
-                             void *&funcaddr_plt, void *&funcaddr) {
+                             std::vector<void *> &funcaddr_plt, void *&funcaddr) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -378,6 +378,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     int dynsymindex = -1;
     int dynstrindex = -1;
     int relapltindex = -1;
+    int reladynindex = -1;
     for (int i = 0; i < targetso.e_shnum; ++i) {
         Elf64_Shdr &s = setions[i];
         std::string name = &shsectionname[s.sh_name];
@@ -392,6 +393,9 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
         }
         if (name == ".rela.plt") {
             relapltindex = i;
+        }
+        if (name == ".rela.dyn") {
+            reladynindex = i;
         }
     }
 
@@ -409,6 +413,10 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     }
     if (relapltindex < 0) {
         ERR("not find .rel.plt %s", soname.c_str());
+        return -1;
+    }
+    if (reladynindex < 0) {
+        ERR("not find .rela.dyn %s", soname.c_str());
         return -1;
     }
 
@@ -443,7 +451,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
         Elf64_Sym &s = sym[j];
         std::string name = &dynstr[s.st_name];
-        if (name == funcname) {
+        if (name == funcname && ELF64_ST_TYPE(s.st_info) == STT_FUNC) {
             symfuncindex = j;
             break;
         }
@@ -461,7 +469,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
         if (name == ".text") {
             void *func = (void *) (sobeginvalue + targetsym.st_value);
             LOG("target text func addr %p", func);
-            funcaddr_plt = 0;
+            funcaddr_plt.clear();
             funcaddr = func;
             return 0;
         }
@@ -487,32 +495,79 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
         }
     }
 
-    if (relafuncindex < 0) {
-        ERR("not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
-        return -1;
-    }
+    Elf64_Shdr &reladynsection = setions[reladynindex];
+    LOG("reladyn index %d", reladynindex);
+    LOG("reladyn section offset %ld", reladynsection.sh_offset);
+    LOG("reladyn section size %ld", reladynsection.sh_size / sizeof(Elf64_Rela));
 
-    Elf64_Rela &relafunc = rela[relafuncindex];
-    LOG("target rela index %d", relafuncindex);
-    LOG("target rela addr %ld", relafunc.r_offset);
-
-    void *func;
-    ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+    Elf64_Rela reladyn[reladynsection.sh_size / sizeof(Elf64_Rela)];
+    ret = remote_process_read(pid, (void *) (sobeginvalue + reladynsection.sh_offset), &reladyn, sizeof(reladyn));
     if (ret != 0) {
         return -1;
     }
 
-    LOG("target got.plt func old addr %p", func);
+    std::vector<int> reladynfuncindexs;
+    for (int j = 0; j < (int) (reladynsection.sh_size / sizeof(Elf64_Rela)); ++j) {
+        Elf64_Rela &r = reladyn[j];
+        if ((int) ELF64_R_SYM(r.r_info) == symfuncindex &&
+            (ELF64_R_TYPE(r.r_info) == R_X86_64_64 || ELF64_R_TYPE(r.r_info) == R_X86_64_GLOB_DAT)) {
+            reladynfuncindexs.push_back(j);
+        }
+    }
 
-    funcaddr_plt = (void *) (sobeginvalue + relafunc.r_offset);
-    funcaddr = func;
+    if (relafuncindex < 0 && reladynfuncindexs.size() <= 0) {
+        ERR("not find %s in .rela.plt or .rela.dyn %s", funcname.c_str(), soname.c_str());
+        return -1;
+    }
+
+    if (relafuncindex >= 0) {
+        Elf64_Rela &relafunc = rela[relafuncindex];
+        LOG("target rela index %d", relafuncindex);
+        LOG("target rela addr %ld", relafunc.r_offset);
+
+        void *func;
+        ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+        if (ret != 0) {
+            return -1;
+        }
+
+        LOG("target got.plt func old addr %p", func);
+
+        funcaddr_plt.push_back((void *) (sobeginvalue + relafunc.r_offset));
+        funcaddr = func;
+    }
+
+    if (reladynfuncindexs.size() > 0) {
+        for (int i = 0; i < (int) reladynfuncindexs.size(); ++i) {
+            Elf64_Rela &relafunc = reladyn[reladynfuncindexs[i]];
+            LOG("target rela index %d", relafuncindex);
+            LOG("target rela addr %ld", relafunc.r_offset);
+
+            void *func;
+            ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+            if (ret != 0) {
+                return -1;
+            }
+
+            if (funcaddr == 0) {
+                funcaddr = func;
+            } else {
+                if (funcaddr != func) {
+                    ERR("diff func addr %s in .rela.plt .rela.dyn %s", funcname.c_str(), soname.c_str());
+                    return -1;
+                }
+            }
+
+            funcaddr_plt.push_back((void *) (sobeginvalue + relafunc.r_offset));
+        }
+    }
 
     return 0;
 }
 
 int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
                               const std::string &funcname,
-                              void *&funcaddr_plt, void *&funcaddr, int sofd) {
+                              std::vector<void *> &funcaddr_plt, void *&funcaddr, int sofd) {
     std::string soname = targetsopath;
     int pos = targetsopath.find_last_of("/");
     if (pos != -1) {
@@ -645,6 +700,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     int dynsymindex = -1;
     int dynstrindex = -1;
     int relapltindex = -1;
+    int reladynindex = -1;
     for (int i = 0; i < targetso.e_shnum; ++i) {
         Elf64_Shdr &s = setions[i];
         std::string name = &shsectionname[s.sh_name];
@@ -659,6 +715,9 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
         }
         if (name == ".rela.plt") {
             relapltindex = i;
+        }
+        if (name == ".rela.dyn") {
+            reladynindex = i;
         }
     }
 
@@ -680,6 +739,11 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     if (relapltindex < 0) {
         munmap(sofileaddr, sofilelen);
         ERR("not find .rel.plt %s", soname.c_str());
+        return -1;
+    }
+    if (reladynindex < 0) {
+        munmap(sofileaddr, sofilelen);
+        ERR("not find .rela.dyn %s", soname.c_str());
         return -1;
     }
 
@@ -708,7 +772,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
         Elf64_Sym &s = sym[j];
         std::string name = &dynstr[s.st_name];
-        if (name == funcname) {
+        if (name == funcname && ELF64_ST_TYPE(s.st_info) == STT_FUNC) {
             symfuncindex = j;
             break;
         }
@@ -728,7 +792,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
             munmap(sofileaddr, sofilelen);
             void *func = (void *) (sobeginvalue + targetsym.st_value);
             LOG("target text func addr %p", func);
-            funcaddr_plt = 0;
+            funcaddr_plt.clear();
             funcaddr = func;
             return 0;
         }
@@ -751,27 +815,73 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
         }
     }
 
-    if (relafuncindex < 0) {
+    Elf64_Shdr &reladynsection = setions[reladynindex];
+    LOG("reladyn index %d", reladynindex);
+    LOG("reladyn section offset %ld", reladynsection.sh_offset);
+    LOG("reladyn section size %ld", reladynsection.sh_size / sizeof(Elf64_Rela));
+
+    Elf64_Rela reladyn[reladynsection.sh_size / sizeof(Elf64_Rela)];
+    memcpy(&reladyn, sofileaddr + reladynsection.sh_offset, sizeof(reladyn));
+
+    std::vector<int> reladynfuncindexs;
+    for (int j = 0; j < (int) (reladynsection.sh_size / sizeof(Elf64_Rela)); ++j) {
+        Elf64_Rela &r = reladyn[j];
+        if ((int) ELF64_R_SYM(r.r_info) == symfuncindex &&
+            (ELF64_R_TYPE(r.r_info) == R_X86_64_64 || ELF64_R_TYPE(r.r_info) == R_X86_64_GLOB_DAT)) {
+            reladynfuncindexs.push_back(j);
+        }
+    }
+
+    if (relafuncindex < 0 && reladynfuncindexs.size() <= 0) {
         munmap(sofileaddr, sofilelen);
-        ERR("not find %s in .rela.plt %s", funcname.c_str(), soname.c_str());
+        ERR("not find %s in .rela.plt or .rela.dyn %s", funcname.c_str(), soname.c_str());
         return -1;
     }
 
-    Elf64_Rela &relafunc = rela[relafuncindex];
-    LOG("target rela index %d", relafuncindex);
-    LOG("target rela addr %ld", relafunc.r_offset);
+    if (relafuncindex >= 0) {
+        Elf64_Rela &relafunc = rela[relafuncindex];
+        LOG("target rela index %d", relafuncindex);
+        LOG("target rela addr %ld", relafunc.r_offset);
 
-    void *func;
-    ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
-    if (ret != 0) {
-        munmap(sofileaddr, sofilelen);
-        return -1;
+        void *func;
+        ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+        if (ret != 0) {
+            munmap(sofileaddr, sofilelen);
+            return -1;
+        }
+
+        LOG("target got.plt func old addr %p", func);
+
+        funcaddr_plt.push_back((void *) (sobeginvalue + relafunc.r_offset));
+        funcaddr = func;
     }
 
-    LOG("target got.plt func old addr %p", func);
+    if (reladynfuncindexs.size() > 0) {
+        for (int i = 0; i < (int) reladynfuncindexs.size(); ++i) {
+            Elf64_Rela &relafunc = reladyn[reladynfuncindexs[i]];
+            LOG("target rela index %d", relafuncindex);
+            LOG("target rela addr %ld", relafunc.r_offset);
 
-    funcaddr_plt = (void *) (sobeginvalue + relafunc.r_offset);
-    funcaddr = func;
+            void *func;
+            ret = remote_process_read(pid, (void *) (sobeginvalue + relafunc.r_offset), &func, sizeof(func));
+            if (ret != 0) {
+                munmap(sofileaddr, sofilelen);
+                return -1;
+            }
+
+            if (funcaddr == 0) {
+                funcaddr = func;
+            } else {
+                if (funcaddr != func) {
+                    munmap(sofileaddr, sofilelen);
+                    ERR("diff func addr %s in .rela.plt .rela.dyn %s", funcname.c_str(), soname.c_str());
+                    return -1;
+                }
+            }
+
+            funcaddr_plt.push_back((void *) (sobeginvalue + relafunc.r_offset));
+        }
+    }
 
     munmap(sofileaddr, sofilelen);
 
@@ -780,7 +890,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
 
 int find_so_func_addr(int pid, const std::string &so,
                       const std::string &funcname,
-                      void *&funcaddr_plt, void *&funcaddr) {
+                      std::vector<void *> &funcaddr_plt, void *&funcaddr) {
 
     int sofd = open(so.c_str(), O_RDONLY);
     if (sofd == -1) {
@@ -1180,7 +1290,7 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     }
     LOG("start inject so %s", abspath);
 
-    void *libc_dlopen_mode_funcaddr_plt = 0;
+    std::vector<void *> libc_dlopen_mode_funcaddr_plt;
     void *libc_dlopen_mode_funcaddr = 0;
     int ret = find_so_func_addr(pid, glibcname, "__libc_dlopen_mode", libc_dlopen_mode_funcaddr_plt,
                                 libc_dlopen_mode_funcaddr);
@@ -1291,7 +1401,7 @@ int close_so(int pid, uint64_t handle) {
 
     LOG("start close so %lu", handle);
 
-    void *libc_dlclose_funcaddr_plt = 0;
+    std::vector<void *> libc_dlclose_funcaddr_plt;
     void *libc_dlclose_funcaddr = 0;
     int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt,
                                 libc_dlclose_funcaddr);
@@ -1380,7 +1490,7 @@ int program_dlcall_impl(int pid, const std::string &targetso, const std::string 
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *target_funcaddr_plt = 0;
+    std::vector<void *> target_funcaddr_plt;
     void *target_funcaddr = 0;
     ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
@@ -1447,7 +1557,7 @@ int program_call_impl(int pid, const std::string &targetso, const std::string &t
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *target_funcaddr_plt = 0;
+    std::vector<void *> target_funcaddr_plt;
     void *target_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
@@ -1570,7 +1680,7 @@ int program_find(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *old_funcaddr_plt = 0;
+    std::vector<void *> old_funcaddr_plt;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
@@ -1605,7 +1715,7 @@ int program_setfunc(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *old_funcaddr_plt = 0;
+    std::vector<void *> old_funcaddr_plt;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
@@ -1614,7 +1724,7 @@ int program_setfunc(int argc, char **argv) {
 
     LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
 
-    if (old_funcaddr_plt == 0) {
+    if (old_funcaddr_plt.size() == 0) {
         // func in .so
         uint64_t backup = 0;
         ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
@@ -1631,12 +1741,13 @@ int program_setfunc(int argc, char **argv) {
         printf("%lu\n", backup);
     } else {
         // func out .so
-        void *new_funcaddr = (void *) value;
-        ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
-        if (ret != 0) {
-            return -1;
+        for (int i = 0; i < (int) old_funcaddr_plt.size(); ++i) {
+            void *new_funcaddr = (void *) value;
+            ret = remote_process_write(pid, old_funcaddr_plt[i], &new_funcaddr, sizeof(new_funcaddr));
+            if (ret != 0) {
+                return -1;
+            }
         }
-
         LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr, new_funcaddr);
         printf("%lu\n", (uint64_t) old_funcaddr);
     }
@@ -1666,7 +1777,7 @@ int program_replace(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    void *old_funcaddr_plt = 0;
+    std::vector<void *> old_funcaddr_plt;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, srcso.c_str(), srcfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
@@ -1687,7 +1798,7 @@ int program_replace(int argc, char **argv) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *new_funcaddr_plt = 0;
+    std::vector<void *> new_funcaddr_plt;
     void *new_funcaddr = 0;
     ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
     if (ret != 0) {
@@ -1697,7 +1808,7 @@ int program_replace(int argc, char **argv) {
 
     LOG("new %s %s=%p offset=%p", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
 
-    if (old_funcaddr_plt == 0) {
+    if (old_funcaddr_plt.size() == 0) {
         // func in .so
         uint64_t backup = 0;
         ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
@@ -1740,10 +1851,12 @@ int program_replace(int argc, char **argv) {
         printf("%lu\t%lu\n", handle, backup);
     } else {
         // func out .so
-        ret = remote_process_write(pid, old_funcaddr_plt, &new_funcaddr, sizeof(new_funcaddr));
-        if (ret != 0) {
-            close_so(pid, handle);
-            return -1;
+        for (int i = 0; i < (int) old_funcaddr_plt.size(); ++i) {
+            ret = remote_process_write(pid, old_funcaddr_plt[i], &new_funcaddr, sizeof(new_funcaddr));
+            if (ret != 0) {
+                close_so(pid, handle);
+                return -1;
+            }
         }
 
         LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
@@ -1769,7 +1882,7 @@ int wait_funccall_so(int pid, const std::string &targetso, const std::string &ta
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    void *old_funcaddr_plt = 0;
+    std::vector<void *> old_funcaddr_plt;
     void *old_funcaddr = 0;
     int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
     if (ret != 0) {
