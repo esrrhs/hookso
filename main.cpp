@@ -267,6 +267,35 @@ int remote_process_write(int remote_pid, void *address, void *buffer, size_t len
     return ret;
 }
 
+template<typename T>
+class arrayholder {
+public:
+    arrayholder(int n) {
+        m_p = (T *) malloc(sizeof(T) * n);
+        m_n = n;
+    }
+
+    ~arrayholder() {
+        free(m_p);
+    }
+
+    T &operator[](int n) {
+        return m_p[n];
+    }
+
+    T *operator&() {
+        return m_p;
+    }
+
+    size_t size() {
+        return m_n * sizeof(T);
+    }
+
+private:
+    T *m_p;
+    int m_n;
+};
+
 int find_so_func_addr_by_mem(int pid, const std::string &soname,
                              const std::string &funcname,
                              std::vector<void *> &funcaddr_plt, void *&funcaddr) {
@@ -358,8 +387,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("section size %d", targetso.e_shentsize);
     LOG("section header string table index %d", targetso.e_shstrndx);
 
-    Elf64_Shdr setions[targetso.e_shnum];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + targetso.e_shoff), &setions, sizeof(setions));
+    arrayholder<Elf64_Shdr> setions(targetso.e_shnum);
+    ret = remote_process_read(pid, (void *) (sobeginvalue + targetso.e_shoff), &setions, setions.size());
     if (ret != 0) {
         return -1;
     }
@@ -368,8 +397,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("section header string table offset %ld", shsection.sh_offset);
     LOG("section header string table size %ld", shsection.sh_size);
 
-    char shsectionname[shsection.sh_size];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + shsection.sh_offset), shsectionname, sizeof(shsectionname));
+    arrayholder<char> shsectionname(shsection.sh_size);
+    ret = remote_process_read(pid, (void *) (sobeginvalue + shsection.sh_offset), &shsectionname, shsectionname.size());
     if (ret != 0) {
         return -1;
     }
@@ -430,8 +459,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("dynsym section offset %ld", dynsymsection.sh_offset);
     LOG("dynsym section size %ld", dynsymsection.sh_size / sizeof(Elf64_Sym));
 
-    Elf64_Sym sym[dynsymsection.sh_size / sizeof(Elf64_Sym)];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + dynsymsection.sh_offset), &sym, sizeof(sym));
+    arrayholder<Elf64_Sym> sym(dynsymsection.sh_size / sizeof(Elf64_Sym));
+    ret = remote_process_read(pid, (void *) (sobeginvalue + dynsymsection.sh_offset), &sym, sym.size());
     if (ret != 0) {
         return -1;
     }
@@ -441,8 +470,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("dynstr section offset %ld", dynstrsection.sh_offset);
     LOG("dynstr section size %ld", dynstrsection.sh_size);
 
-    char dynstr[dynstrsection.sh_size];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + dynstrsection.sh_offset), dynstr, sizeof(dynstr));
+    arrayholder<char> dynstr(dynstrsection.sh_size);
+    ret = remote_process_read(pid, (void *) (sobeginvalue + dynstrsection.sh_offset), &dynstr, dynstr.size());
     if (ret != 0) {
         return -1;
     }
@@ -480,8 +509,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("relaplt section offset %ld", relapltsection.sh_offset);
     LOG("relaplt section size %ld", relapltsection.sh_size / sizeof(Elf64_Rela));
 
-    Elf64_Rela rela[relapltsection.sh_size / sizeof(Elf64_Rela)];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + relapltsection.sh_offset), &rela, sizeof(rela));
+    arrayholder<Elf64_Rela> rela(relapltsection.sh_size / sizeof(Elf64_Rela));
+    ret = remote_process_read(pid, (void *) (sobeginvalue + relapltsection.sh_offset), &rela, rela.size());
     if (ret != 0) {
         return -1;
     }
@@ -500,8 +529,8 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     LOG("reladyn section offset %ld", reladynsection.sh_offset);
     LOG("reladyn section size %ld", reladynsection.sh_size / sizeof(Elf64_Rela));
 
-    Elf64_Rela reladyn[reladynsection.sh_size / sizeof(Elf64_Rela)];
-    ret = remote_process_read(pid, (void *) (sobeginvalue + reladynsection.sh_offset), &reladyn, sizeof(reladyn));
+    arrayholder<Elf64_Rela> reladyn(reladynsection.sh_size / sizeof(Elf64_Rela));
+    ret = remote_process_read(pid, (void *) (sobeginvalue + reladynsection.sh_offset), &reladyn, reladyn.size());
     if (ret != 0) {
         return -1;
     }
@@ -686,15 +715,15 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
         return -1;
     }
 
-    Elf64_Shdr setions[targetso.e_shnum];
-    memcpy(&setions, sofileaddr + targetso.e_shoff, sizeof(setions));
+    arrayholder<Elf64_Shdr> setions(targetso.e_shnum);
+    memcpy(&setions, sofileaddr + targetso.e_shoff, setions.size());
 
     Elf64_Shdr &shsection = setions[targetso.e_shstrndx];
     LOG("section header string table offset %ld", shsection.sh_offset);
     LOG("section header string table size %ld", shsection.sh_size);
 
-    char shsectionname[shsection.sh_size];
-    memcpy(shsectionname, sofileaddr + shsection.sh_offset, sizeof(shsectionname));
+    arrayholder<char> shsectionname(shsection.sh_size);
+    memcpy(&shsectionname, sofileaddr + shsection.sh_offset, shsectionname.size());
 
     int pltindex = -1;
     int dynsymindex = -1;
@@ -757,16 +786,16 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     LOG("dynsym section offset %ld", dynsymsection.sh_offset);
     LOG("dynsym section size %ld", dynsymsection.sh_size / sizeof(Elf64_Sym));
 
-    Elf64_Sym sym[dynsymsection.sh_size / sizeof(Elf64_Sym)];
-    memcpy(&sym, sofileaddr + dynsymsection.sh_offset, sizeof(sym));
+    arrayholder<Elf64_Sym> sym(dynsymsection.sh_size / sizeof(Elf64_Sym));
+    memcpy(&sym, sofileaddr + dynsymsection.sh_offset, sym.size());
 
     Elf64_Shdr &dynstrsection = setions[dynstrindex];
     LOG("dynstr index %d", dynstrindex);
     LOG("dynstr section offset %ld", dynstrsection.sh_offset);
     LOG("dynstr section size %ld", dynstrsection.sh_size);
 
-    char dynstr[dynstrsection.sh_size];
-    memcpy(dynstr, sofileaddr + dynstrsection.sh_offset, sizeof(dynstr));
+    arrayholder<char> dynstr(dynstrsection.sh_size);
+    memcpy(&dynstr, sofileaddr + dynstrsection.sh_offset, dynstr.size());
 
     int symfuncindex = -1;
     for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
@@ -803,8 +832,8 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     LOG("relaplt section offset %ld", relapltsection.sh_offset);
     LOG("relaplt section size %ld", relapltsection.sh_size / sizeof(Elf64_Rela));
 
-    Elf64_Rela rela[relapltsection.sh_size / sizeof(Elf64_Rela)];
-    memcpy(&rela, sofileaddr + relapltsection.sh_offset, sizeof(rela));
+    arrayholder<Elf64_Rela> rela(relapltsection.sh_size / sizeof(Elf64_Rela));
+    memcpy(&rela, sofileaddr + relapltsection.sh_offset, rela.size());
 
     int relafuncindex = -1;
     for (int j = 0; j < (int) (relapltsection.sh_size / sizeof(Elf64_Rela)); ++j) {
@@ -820,8 +849,8 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     LOG("reladyn section offset %ld", reladynsection.sh_offset);
     LOG("reladyn section size %ld", reladynsection.sh_size / sizeof(Elf64_Rela));
 
-    Elf64_Rela reladyn[reladynsection.sh_size / sizeof(Elf64_Rela)];
-    memcpy(&reladyn, sofileaddr + reladynsection.sh_offset, sizeof(reladyn));
+    arrayholder<Elf64_Rela> reladyn(reladynsection.sh_size / sizeof(Elf64_Rela));
+    memcpy(&reladyn, sofileaddr + reladynsection.sh_offset, reladyn.size());
 
     std::vector<int> reladynfuncindexs;
     for (int j = 0; j < (int) (reladynsection.sh_size / sizeof(Elf64_Rela)); ++j) {
