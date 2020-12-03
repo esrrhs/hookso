@@ -1393,6 +1393,9 @@ int usage() {
            "get target.so target-function call argument: \n"
            "# ./hookso arg pid target-so target-func arg-index \n"
            "\n"
+           "get target-function-addr call argument: \n"
+           "# ./hookso argp pid func-addr arg-index \n"
+           "\n"
            "before call target.so target-function, do syscall/call/dlcall with params: \n"
            "# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s=\"string-param3\" \n"
            "# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
@@ -1907,24 +1910,17 @@ void backup_function(int sig) {
     exit(0);
 }
 
-int wait_funccall_so(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t args[]) {
+int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
-    std::vector<void *> old_funcaddr_plt;
-    void *old_funcaddr = 0;
-    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
-    if (ret != 0) {
-        return -1;
-    }
-
     uint64_t backup = 0;
-    ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+    int ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
     if (ret != 0) {
         return -1;
     }
 
-    LOG("arg %s %s backup=%lu", targetso.c_str(), targetfunc.c_str(), backup);
+    LOG("arg %p backup=%lu", old_funcaddr, backup);
 
     struct user_regs_struct oldregs;
     ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
@@ -2057,6 +2053,52 @@ int wait_funccall_so(int pid, const std::string &targetso, const std::string &ta
     args[3] = regs.r10;
     args[4] = regs.r8;
     args[5] = regs.r9;
+
+    return 0;
+}
+
+int wait_funccall_so(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t args[]) {
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    std::vector<void *> old_funcaddr_plt;
+    void *old_funcaddr = 0;
+    int ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), old_funcaddr_plt, old_funcaddr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    return wait_funccall_addr(pid, old_funcaddr, args);
+}
+
+int program_argp(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetaddr = argv[3];
+    std::string argindexstr = argv[4];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target targetaddr=%s", targetaddr.c_str());
+    LOG("arg index=%s", argindexstr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    int argindex = atoi(argindexstr.c_str());
+
+    void *old_funcaddr = (void *) std::stoull(targetaddr.c_str());
+
+    uint64_t args[6] = {0};
+    int ret = wait_funccall_addr(pid, old_funcaddr, args);
+    if (ret != 0) {
+        return -1;
+    }
+
+    if (argindex >= 1 && argindex <= 6) {
+        printf("%lu\n", args[argindex - 1]);
+    }
 
     return 0;
 }
@@ -2278,6 +2320,8 @@ int main(int argc, char **argv) {
         ret = program_find(argc, argv);
     } else if (type == "arg") {
         ret = program_arg(argc, argv);
+    } else if (type == "argp") {
+        ret = program_argp(argc, argv);
     } else if (type == "trigger") {
         ret = program_trigger(argc, argv);
     } else {

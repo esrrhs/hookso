@@ -15,6 +15,7 @@ Hookso is a Linux dynamic link library injection modification search tool, used 
 * Restore .so function replacement
 * Find the function address of .so
 * When a function of .so is executed, trigger the execution of a new function
+* View function parameters of an address
 
 # Compile
 Git clone code, run scripts, generate hookso and test programs
@@ -302,6 +303,14 @@ libtestnew 974
 libtest 974
 libtest 975
 ```
+* Example 15: View the function parameter value of a certain address, such as the address obtained by find, or the address obtained by other means
+```
+# ./hookso argp 11234 140573469644392 1
+35
+# ./hookso arg 11234 140573469644392 1
+36
+```
+The last parameter 1 represents the first parameter. Because test is looping +1, the parameters passed into the libtest function are changing every time
 
 # QA
 ##### Why is there a main.cpp of 2K lines?
