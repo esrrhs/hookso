@@ -16,9 +16,8 @@ hookso是一个linux动态链接库的注入修改查找工具，用来修改其
 * 把旧.so的函数替换为新.so的函数
 * 复原.so的函数替换
 * 查找.so的函数地址
-* 查看.so的函数参数
-* 当执行.so的某个函数时，触发执行新的函数
-* 查看某个地址的函数参数
+* 查看.so的函数参数，或某个地址的函数参数
+* 当执行.so的某个函数时或某个地址的函数时，触发执行新的函数
 
 # 编译
 git clone代码，运行脚本，生成hookso以及测试程序
@@ -308,7 +307,19 @@ libtest 974
 libtest 975
 ```
 
-* 示例15：查看某个地址的函数传参值，例如通过find得到的地址，或者其他途径得到的地址
+* 示例15：当执行libtest.so的libtest时，执行dlopen，注入libtestnew.so
+```
+./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so  
+15367360
+```
+
+* 示例16：当执行libtest.so的libtest时，执行dlclose，卸载libtestnew.so
+```
+./hookso trigger 11234 libtest.so libtest dlclose 15367360
+15367360
+```
+
+* 示例17：查看某个地址的函数传参值，例如通过find得到的地址，或者其他途径得到的地址
 ```
 # ./hookso argp 11234 140573469644392 1
 35
@@ -316,6 +327,64 @@ libtest 975
 36
 ```
 最后一个参数1表示第1个参数，因为test是在循环+1，所以每次传入libtest函数的参数都在变化
+
+* 示例18：当执行某个地址的函数时，执行syscall，在屏幕上输出haha
+```
+./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
+4
+```
+其他triggerp的参数，与trigger相同，不再赘述
+
+# 用法
+```
+hookso: type pid params
+
+eg:
+
+do syscall: 
+# ./hookso syscall pid syscall-number i=int-param1 s="string-param2" 
+
+call .so function: 
+# ./hookso call pid target-so target-func i=int-param1 s="string-param2" 
+
+dlopen .so: 
+# ./hookso dlopen pid target-so-path 
+
+dlclose .so: 
+# ./hookso dlclose pid handle 
+
+open .so and call function and close: 
+# ./hookso dlcall pid target-so-path target-func i=int-param1 s="string-param2" 
+
+replace src.so old-function to target.so new-function: 
+# ./hookso replace pid src-so src-func target-so-path target-func 
+
+set target.so target-function new value : 
+# ./hookso setfunc pid target-so target-func value 
+
+find target.so target-function : 
+# ./hookso find pid target-so target-func 
+
+get target.so target-function call argument: 
+# ./hookso arg pid target-so target-func arg-index 
+
+get target-function-addr call argument: 
+# ./hookso argp pid func-addr arg-index 
+
+before call target.so target-function, do syscall/call/dlcall/dlopen/dlclose with params: 
+# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func dlopen target-so-path
+# ./hookso trigger pid target-so target-func dlclose handle
+
+before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with params: 
+# ./hookso triggerp pid func-addr syscall syscall-number @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr dlopen target-so-path
+# ./hookso triggerp pid func-addr dlclose handle
+```
 
 # QA
 ##### 为什么就一个2k行+的main.cpp?

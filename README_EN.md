@@ -14,8 +14,8 @@ Hookso is a Linux dynamic link library injection modification search tool, used 
 * Replace old .so functions with new .so functions
 * Restore .so function replacement
 * Find the function address of .so
-* When a function of .so is executed, trigger the execution of a new function
-* View function parameters of an address
+* View function parameters of .so, or function parameters of a certain address
+* When a function of .so or a function of a certain address is executed, the execution of a new function is triggered
 
 # Compile
 Git clone code, run scripts, generate hookso and test programs
@@ -303,7 +303,19 @@ libtestnew 974
 libtest 974
 libtest 975
 ```
-* Example 15: View the function parameter value of a certain address, such as the address obtained by find, or the address obtained by other means
+
+* Example 15: When executing libtest of libtest.so, execute dlopen and inject libtestnew.so
+```
+./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so
+15367360
+```
+
+* Example 16: When executing libtest of libtest.so, execute dlclose and uninstall libtestnew.so
+```
+./hookso trigger 11234 libtest.so libtest dlclose 15367360
+15367360
+```
+* Example 17: View the function parameter value of a certain address, such as the address obtained by find, or the address obtained by other means
 ```
 # ./hookso argp 11234 140573469644392 1
 35
@@ -311,6 +323,64 @@ libtest 975
 36
 ```
 The last parameter 1 represents the first parameter. Because test is looping +1, the parameters passed into the libtest function are changing every time
+
+* Example 18: When executing a function at a certain address, execute syscall and output haha ​​on the screen
+```
+./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
+4
+```
+Other triggerp parameters are the same as trigger, so I won’t repeat them
+
+# Usage
+```
+hookso: type pid params
+
+eg:
+
+do syscall: 
+# ./hookso syscall pid syscall-number i=int-param1 s="string-param2" 
+
+call .so function: 
+# ./hookso call pid target-so target-func i=int-param1 s="string-param2" 
+
+dlopen .so: 
+# ./hookso dlopen pid target-so-path 
+
+dlclose .so: 
+# ./hookso dlclose pid handle 
+
+open .so and call function and close: 
+# ./hookso dlcall pid target-so-path target-func i=int-param1 s="string-param2" 
+
+replace src.so old-function to target.so new-function: 
+# ./hookso replace pid src-so src-func target-so-path target-func 
+
+set target.so target-function new value : 
+# ./hookso setfunc pid target-so target-func value 
+
+find target.so target-function : 
+# ./hookso find pid target-so target-func 
+
+get target.so target-function call argument: 
+# ./hookso arg pid target-so target-func arg-index 
+
+get target-function-addr call argument: 
+# ./hookso argp pid func-addr arg-index 
+
+before call target.so target-function, do syscall/call/dlcall/dlopen/dlclose with params: 
+# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso trigger pid target-so target-func dlopen target-so-path
+# ./hookso trigger pid target-so target-func dlclose handle
+
+before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with params: 
+# ./hookso triggerp pid func-addr syscall syscall-number @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
+# ./hookso triggerp pid func-addr dlopen target-so-path
+# ./hookso triggerp pid func-addr dlclose handle
+```
 
 # QA
 ##### Why is there a main.cpp of 2K lines?
