@@ -1796,8 +1796,9 @@ int program_setfunc(int argc, char **argv) {
             if (ret != 0) {
                 return -1;
             }
+            LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr,
+                new_funcaddr);
         }
-        LOG("set plt func %s %s ok from %p to %p", targetso.c_str(), targetfunc.c_str(), old_funcaddr, new_funcaddr);
         printf("%lu\n", (uint64_t) old_funcaddr);
     }
 
@@ -1923,13 +1924,14 @@ uint64_t grecovercode;
 void backup_function(int sig) {
     if (grecoverpid > 0) {
         remote_process_write(grecoverpid, grecoverfuncaddr, &grecovercode, sizeof(grecovercode));
+        grecoverpid = 0;
     }
     exit(0);
 }
 
 int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
 
-    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+    LOG("start parse so file %p", old_funcaddr);
 
     uint64_t backup = 0;
     int ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
@@ -1967,6 +1969,17 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
         return -1;
     }
 
+    grecoverpid = pid;
+    grecoverfuncaddr = old_funcaddr;
+    grecovercode = backup;
+    signal(SIGKILL, backup_function);
+    signal(SIGSTOP, backup_function);
+    signal(SIGTERM, backup_function);
+    signal(SIGHUP, backup_function);
+    signal(SIGINT, backup_function);
+    signal(SIGQUIT, backup_function);
+    signal(SIGUSR1, backup_function);
+
     LOG("set code=%lu", newcode);
 
     ret = ptrace(PTRACE_CONT, pid, 0, 0);
@@ -1974,14 +1987,6 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
         ERR("ptrace %d PTRACE_CONT fail", pid);
         return -1;
     }
-
-    grecoverpid = pid;
-    grecoverfuncaddr = old_funcaddr;
-    grecovercode = backup;
-    signal(SIGHUP, backup_function);
-    signal(SIGINT, backup_function);
-    signal(SIGQUIT, backup_function);
-    signal(SIGUSR1, backup_function);
 
     int errsv = 0;
     int status = 0;
@@ -2027,14 +2032,6 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
         }
     }
 
-    grecoverpid = 0;
-    grecoverfuncaddr = 0;
-    grecovercode = 0;
-    signal(SIGHUP, SIG_DFL);
-    signal(SIGINT, SIG_DFL);
-    signal(SIGQUIT, SIG_DFL);
-    signal(SIGUSR1, SIG_DFL);
-
     struct user_regs_struct regs;
     if (!errsv) {
         ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
@@ -2048,6 +2045,17 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
     if (ret != 0) {
         return -1;
     }
+
+    grecoverpid = 0;
+    grecoverfuncaddr = 0;
+    grecovercode = 0;
+    signal(SIGKILL, SIG_DFL);
+    signal(SIGSTOP, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGHUP, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGUSR1, SIG_DFL);
 
     LOG("set back=%lu", backup);
 
