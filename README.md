@@ -390,7 +390,7 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ##### 为什么就一个2k行+的main.cpp?
 因为东西简单，减少无谓的封装，增加可读性
 ##### 这东西实际有什么作用？
-如同瑞士军刀一样，用处很多。可以用来热更新，或者监控某些函数行为
+如同瑞士军刀一样，用处很多。可以用来热更新，或者监控某些函数行为，或者开启调试
 ##### 函数调用有什么限制？
 syscall、call、dlcall只支持最大6个参数的函数调用，并且参数只能支持整形、字符  
 replace不受限制，但是必须确保新的函数和旧函数，参数一致，不然会core掉
