@@ -1396,10 +1396,19 @@ int usage() {
            "get target-function-addr call argument: \n"
            "# ./hookso argp pid func-addr arg-index \n"
            "\n"
-           "before call target.so target-function, do syscall/call/dlcall with params: \n"
+           "before call target.so target-function, do syscall/call/dlcall/dlopen/dlclose with params: \n"
            "# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s=\"string-param3\" \n"
            "# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
            "# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso trigger pid target-so target-func dlopen target-so-path\n"
+           "# ./hookso trigger pid target-so target-func dlclose handle\n"
+           "\n"
+           "before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with params: \n"
+           "# ./hookso triggerp pid func-addr syscall syscall-number @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso triggerp pid func-addr call trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso triggerp pid func-addr dlcall trigger-target-so trigger-target-func @1 i=int-param2 s=\"string-param3\" \n"
+           "# ./hookso triggerp pid func-addr dlopen target-so-path\n"
+           "# ./hookso triggerp pid func-addr dlclose handle\n"
            "\n"
     );
     return -1;
@@ -1456,6 +1465,17 @@ int close_so(int pid, uint64_t handle) {
     return 0;
 }
 
+int program_dlclose_impl(int pid, uint64_t handle) {
+    int ret = close_so(pid, handle);
+    if (ret != 0) {
+        return -1;
+    }
+
+    printf("%lu\n", handle);
+
+    return 0;
+}
+
 int program_dlclose(int argc, char **argv) {
 
     if (argc < 4) {
@@ -1473,7 +1493,12 @@ int program_dlclose(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
     uint64_t handle = std::stoull(handlestr.c_str());
 
-    int ret = close_so(pid, handle);
+    return program_dlclose_impl(pid, handle);
+}
+
+int program_dlopen_impl(int pid, const std::string &targetso) {
+    uint64_t handle = 0;
+    int ret = inject_so(pid, targetso, handle);
     if (ret != 0) {
         return -1;
     }
@@ -1499,15 +1524,7 @@ int program_dlopen(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    uint64_t handle = 0;
-    int ret = inject_so(pid, targetso, handle);
-    if (ret != 0) {
-        return -1;
-    }
-
-    printf("%lu\n", handle);
-
-    return 0;
+    return program_dlopen_impl(pid, targetso);
 }
 
 int program_dlcall_impl(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t arg[]) {
@@ -2135,46 +2152,45 @@ int program_arg(int argc, char **argv) {
     return 0;
 }
 
-int program_trigger(int argc, char **argv) {
-
-    if (argc < 6) {
-        return usage();
-    }
-
-    std::string pidstr = argv[2];
-    std::string targetso = argv[3];
-    std::string targetfunc = argv[4];
-    std::string calltype = argv[5];
+int
+program_trigger_impl(int argc, char **argv, int pid, std::string calltype, int calltypeindex, uint64_t target_args[]) {
 
     std::string trigger_syscallnostr;
 
     std::string trigger_targetso;
     std::string trigger_targetfunc;
+
+    uint64_t trigger_targethandle;
+
     int argstart = 0;
 
     if (calltype == "syscall") {
-        if (argc < 7) {
+        if (argc < calltypeindex + 2) {
             return usage();
         }
-        trigger_syscallnostr = argv[6];
-        argstart = 7;
+        trigger_syscallnostr = argv[calltypeindex + 1];
+        argstart = calltypeindex + 2;
     } else if (calltype == "dlcall" || calltype == "call") {
-        if (argc < 8) {
+        if (argc < calltypeindex + 3) {
             return usage();
         }
-        trigger_targetso = argv[6];
-        trigger_targetfunc = argv[7];
-        argstart = 8;
+        trigger_targetso = argv[calltypeindex + 1];
+        trigger_targetfunc = argv[calltypeindex + 2];
+        argstart = calltypeindex + 3;
+    } else if (calltype == "dlopen") {
+        if (argc < calltypeindex + 2) {
+            return usage();
+        }
+        trigger_targetso = argv[calltypeindex + 1];
+        argstart = calltypeindex + 2;
+    } else if (calltype == "dlclose") {
+        if (argc < calltypeindex + 2) {
+            return usage();
+        }
+        trigger_targethandle = std::stoull(argv[calltypeindex + 1]);
+        argstart = calltypeindex + 2;
     } else {
-        ERR("calltype %s must be syscall/dlcall", calltype.c_str());
-        return -1;
-    }
-
-    int pid = atoi(pidstr.c_str());
-
-    uint64_t target_args[6] = {0};
-    int ret = wait_funccall_so(pid, targetso, targetfunc, target_args);
-    if (ret != 0) {
+        ERR("calltype %s must be syscall/dlcall/call", calltype.c_str());
         return -1;
     }
 
@@ -2190,7 +2206,7 @@ int program_trigger(int argc, char **argv) {
                 return -1;
             }
         } else {
-            ret = parse_arg_to_so(pid, argstr, arg[i - argstart]);
+            int ret = parse_arg_to_so(pid, argstr, arg[i - argstart]);
             if (ret != 0) {
                 return -1;
             }
@@ -2200,23 +2216,78 @@ int program_trigger(int argc, char **argv) {
 
     if (calltype == "syscall") {
         int syscallno = atoi(trigger_syscallnostr.c_str());
-        ret = program_syscall_impl(pid, syscallno, arg);
+        int ret = program_syscall_impl(pid, syscallno, arg);
         if (ret != 0) {
             return -1;
         }
     } else if (calltype == "call") {
-        ret = program_call_impl(pid, trigger_targetso, trigger_targetfunc, arg);
+        int ret = program_call_impl(pid, trigger_targetso, trigger_targetfunc, arg);
         if (ret != 0) {
             return -1;
         }
     } else if (calltype == "dlcall") {
-        ret = program_dlcall_impl(pid, trigger_targetso, trigger_targetfunc, arg);
+        int ret = program_call_impl(pid, trigger_targetso, trigger_targetfunc, arg);
+        if (ret != 0) {
+            return -1;
+        }
+    } else if (calltype == "dlopen") {
+        int ret = program_dlopen_impl(pid, trigger_targetso);
+        if (ret != 0) {
+            return -1;
+        }
+    } else if (calltype == "dlclose") {
+        int ret = program_dlclose_impl(pid, trigger_targethandle);
         if (ret != 0) {
             return -1;
         }
     }
 
     return 0;
+}
+
+int program_triggerp(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetaddr = argv[3];
+    std::string calltype = argv[4];
+
+    int pid = atoi(pidstr.c_str());
+
+    void *old_funcaddr = (void *) std::stoull(targetaddr.c_str());
+
+    uint64_t target_args[6] = {0};
+    int ret = wait_funccall_addr(pid, old_funcaddr, target_args);
+    if (ret != 0) {
+        return -1;
+    }
+
+    return program_trigger_impl(argc, argv, pid, calltype, 4, target_args);
+}
+
+int program_trigger(int argc, char **argv) {
+
+    if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetso = argv[3];
+    std::string targetfunc = argv[4];
+    std::string calltype = argv[5];
+
+    int pid = atoi(pidstr.c_str());
+
+    uint64_t target_args[6] = {0};
+    int ret = wait_funccall_so(pid, targetso, targetfunc, target_args);
+    if (ret != 0) {
+        return -1;
+    }
+
+    return program_trigger_impl(argc, argv, pid, calltype, 5, target_args);
 }
 
 int ini_hookso_env(int pid) {
@@ -2324,6 +2395,8 @@ int main(int argc, char **argv) {
         ret = program_argp(argc, argv);
     } else if (type == "trigger") {
         ret = program_trigger(argc, argv);
+    } else if (type == "triggerp") {
+        ret = program_triggerp(argc, argv);
     } else {
         usage();
         ret = -1;
