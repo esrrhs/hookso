@@ -2005,7 +2005,7 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
-            } else if (WSTOPSIG(status) == SIGALRM) {
+            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGCHLD) {
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
