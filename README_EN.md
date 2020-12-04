@@ -386,7 +386,7 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ##### Why is there a main.cpp of 2K lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
-Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions
+Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions, or turn on debugging
 ##### What are the limitations of function calls?
 syscall, call, and dlcall only support function calls with a maximum of 6 parameters, and the parameters can only support integers and characters
 Replace is not limited, but you must ensure that the new function and the old function have the same parameters, otherwise they will core out
