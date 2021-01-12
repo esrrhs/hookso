@@ -404,6 +404,8 @@ Modify the so parameter to the file path, so that the so information will be rea
 As you can see, the find command has been successfully executed, the same is true for other commands such as call, dlopen, and replace
 
 # Who is using
-[Lua code coverage tool cLua](https://github.com/esrrhs/cLua)
+[Lua code coverage tool](https://github.com/esrrhs/cLua)
 
-[Lua performance analysis tool pLua](https://github.com/esrrhs/pLua)
+[Lua performance analysis tool](https://github.com/esrrhs/pLua)
+
+[Lua debug tool](https://github.com/esrrhs/dlua)
