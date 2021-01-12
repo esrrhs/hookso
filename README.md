@@ -412,3 +412,5 @@ replace不受限制，但是必须确保新的函数和旧函数，参数一致�
 
 [Lua 性能分析工具 pLua](https://github.com/esrrhs/pLua)
 
+[Lua 调试工具 dLua](https://github.com/esrrhs/dlua)
+
