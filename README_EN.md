@@ -319,7 +319,7 @@ libtest 975
 ```
 # ./hookso argp 11234 140573469644392 1
 35
-# ./hookso arg 11234 140573469644392 1
+# ./hookso argp 11234 140573469644392 1
 36
 ```
 The last parameter 1 represents the first parameter. Because test is looping +1, the parameters passed into the libtest function are changing every time
