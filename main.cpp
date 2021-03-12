@@ -1384,8 +1384,14 @@ int usage() {
            "replace src.so old-function to target.so new-function: \n"
            "# ./hookso replace pid src-so src-func target-so-path target-func \n"
            "\n"
+           "replace target-function-addr to target.so new-function: \n"
+           "# ./hookso replacep pid func-addr target-so-path target-func \n"
+           "\n"
            "set target.so target-function new value : \n"
            "# ./hookso setfunc pid target-so target-func value \n"
+           "\n"
+           "set target-function-addr new value : \n"
+           "# ./hookso setfuncp pid func-addr value \n"
            "\n"
            "find target.so target-function : \n"
            "# ./hookso find pid target-so target-func \n"
@@ -1736,7 +1742,7 @@ int program_find(int argc, char **argv) {
         return -1;
     }
 
-    LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
+    LOG("old %s %s=%p offset=%d", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt.size());
 
     printf("%p\t%lu\n", old_funcaddr, (uint64_t) old_funcaddr);
 
@@ -1771,7 +1777,7 @@ int program_setfunc(int argc, char **argv) {
         return -1;
     }
 
-    LOG("old %s %s=%p offset=%lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt);
+    LOG("old %s %s=%p offset=%d", targetso.c_str(), targetfunc.c_str(), old_funcaddr, old_funcaddr_plt.size());
 
     if (old_funcaddr_plt.size() == 0) {
         // func in .so
@@ -1801,6 +1807,45 @@ int program_setfunc(int argc, char **argv) {
         }
         printf("%lu\n", (uint64_t) old_funcaddr);
     }
+
+    return 0;
+}
+
+int program_setfuncp(int argc, char **argv) {
+
+    if (argc < 5) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string targetaddr = argv[3];
+    std::string valuestr = argv[4];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("target addr=%s", targetaddr.c_str());
+    LOG("valuestr=%s", valuestr.c_str());
+
+    int pid = atoi(pidstr.c_str());
+    uint64_t funcaddr = std::stoull(targetaddr.c_str());
+    uint64_t value = std::stoull(valuestr.c_str());
+
+    void *old_funcaddr = (void *) funcaddr;
+    LOG("old %p", old_funcaddr);
+
+    // func in .so
+    uint64_t backup = 0;
+    int ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+    if (ret != 0) {
+        return -1;
+    }
+
+    ret = remote_process_write(pid, old_funcaddr, &value, sizeof(value));
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("set text func %s %s ok from %p to %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, value);
+    printf("%lu\n", backup);
 
     return 0;
 }
@@ -1856,7 +1901,7 @@ int program_replace(int argc, char **argv) {
         return -1;
     }
 
-    LOG("new %s %s=%p offset=%p", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt);
+    LOG("new %s %s=%p offset=%d", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt.size());
 
     if (old_funcaddr_plt.size() == 0) {
         // func in .so
@@ -1912,6 +1957,124 @@ int program_replace(int argc, char **argv) {
         LOG("replace plt func ok from %s %s=%p to %s %s=%p", srcso.c_str(), srcfunc.c_str(), old_funcaddr,
             targetso.c_str(), targetfunc.c_str(), new_funcaddr);
         printf("%lu\t%lu\n", handle, (uint64_t) old_funcaddr);
+    }
+
+    return 0;
+}
+
+int program_replacep(int argc, char **argv) {
+
+    if (argc < 6) {
+        return usage();
+    }
+
+    std::string pidstr = argv[2];
+    std::string srcaddr = argv[3];
+    std::string targetso = argv[4];
+    std::string targetfunc = argv[5];
+
+    LOG("pid=%s", pidstr.c_str());
+    LOG("src function addr=%s", srcaddr.c_str());
+    LOG("target so=%s", targetso.c_str());
+    LOG("target function=%s", targetfunc.c_str());
+
+    int pid = atoi(pidstr.c_str());
+
+    void *old_funcaddr = (void *) std::stoull(srcaddr.c_str());
+
+    LOG("old %s=%p", srcaddr.c_str(), old_funcaddr);
+
+    LOG("start inject so file %s", targetso.c_str());
+
+    uint64_t handle = 0;
+    int ret = inject_so(pid, targetso, handle);
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("inject so file %s ok", targetso.c_str());
+
+    LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
+
+    std::vector<void *> new_funcaddr_plt;
+    void *new_funcaddr = 0;
+    ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), new_funcaddr_plt, new_funcaddr);
+    if (ret != 0) {
+        close_so(pid, handle);
+        return -1;
+    }
+
+    LOG("new %s %s=%p offset=%d", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt.size());
+
+    uint64_t backup = 0;
+    ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
+    if (ret != 0) {
+        close_so(pid, handle);
+        return -1;
+    }
+
+    // check is got
+    uint8_t *backup_code = (uint8_t * ) & backup;
+    if ((uint64_t) old_funcaddr < (uint64_t) 0xFFFFFFFF && backup_code[0] == (uint8_t) 0xFF &&
+        backup_code[1] == (uint8_t) 0x25 && // jmpq   *0x200912(%rip)
+        backup_code[6] == (uint8_t) 0x68) { // pushq  $0x2
+
+        uint64_t offset = (int) (backup >> 16);
+        LOG("got offset=%llu", offset);
+        void *gotaddr = (void *) ((uint64_t) old_funcaddr + offset + 6);
+        LOG("gotaddr =%p", gotaddr);
+
+        ret = remote_process_read(pid, gotaddr, &backup, sizeof(backup));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        ret = remote_process_write(pid, gotaddr, &new_funcaddr, sizeof(new_funcaddr));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        LOG("replace got func ok from %s=%p to %s %s=%p", srcaddr.c_str(), old_funcaddr, targetso.c_str(),
+            targetfunc.c_str(), new_funcaddr);
+        printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
+
+    } else {
+
+        uint64_t offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
+        LOG("jump offset=%llu", offset);
+
+        char code[8] = {0};
+        code[0] = 0xe9;
+        memcpy(&code[1], &new_funcaddr, sizeof(new_funcaddr));
+
+        // check
+        struct user_regs_struct oldregs;
+        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            return -1;
+        }
+
+        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
+            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
+            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
+                (uint64_t) oldregs.rip);
+            return -1;
+        }
+
+        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        LOG("replace text func ok from %s=%p to %s %s=%p", srcaddr.c_str(), old_funcaddr, targetso.c_str(),
+            targetfunc.c_str(), new_funcaddr);
+        printf("%lu\t%lu\t%lu\n", handle, (uint64_t) old_funcaddr, backup);
     }
 
     return 0;
@@ -2383,6 +2546,8 @@ int main(int argc, char **argv) {
 
     if (type == "replace") {
         ret = program_replace(argc, argv);
+    } else if (type == "replacep") {
+        ret = program_replacep(argc, argv);
     } else if (type == "syscall") {
         ret = program_syscall(argc, argv);
     } else if (type == "call") {
@@ -2395,6 +2560,8 @@ int main(int argc, char **argv) {
         ret = program_dlcall(argc, argv);
     } else if (type == "setfunc") {
         ret = program_setfunc(argc, argv);
+    } else if (type == "setfuncp") {
+        ret = program_setfuncp(argc, argv);
     } else if (type == "find") {
         ret = program_find(argc, argv);
     } else if (type == "arg") {
