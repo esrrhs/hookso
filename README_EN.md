@@ -11,8 +11,8 @@ Hookso is a Linux dynamic link library injection modification search tool, used 
 * Let a process execute a function of .so
 * Attach a new .so to a process
 * Uninstall a process of .so
-* Replace old .so functions with new .so functions
-* Restore .so function replacement
+* Replace the function of the old .so or an address with the function of the new .so
+* Restore the function of .so or the replacement of an address
 * Find the function address of .so
 * View function parameters of .so, or function parameters of a certain address
 * When a function of .so or a function of a certain address is executed, the execution of a new function is triggered
@@ -264,7 +264,7 @@ The last parameter 1 represents the first parameter, because test is looping +1,
 
 * Example 12: When executing libtest of libtest.so, execute syscall and output haha ​​on the screen
 ```
-./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
+# ./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
 4
 ```
 Then observe the output of test, you can see the output of the call
@@ -277,7 +277,7 @@ libtest 524
 
 * Example 13: When the libtest of libtest.so is executed, call is executed, and the libtest function is called once with the same parameters
 ```
-./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
+# ./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
 0
 ```
 Then observe the output of test, you can see that 818 is output twice
@@ -292,7 +292,7 @@ libtest 820
 
 * Example 14: When executing libtest of libtest.so, execute dlcall and call the libtestnew function of libtestnew.so once with the same parameters
 ```
-./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
+# ./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
 0
 ```
 Then observe the output of test, you can see that the result of libtestnew is output
@@ -306,13 +306,13 @@ libtest 975
 
 * Example 15: When executing libtest of libtest.so, execute dlopen and inject libtestnew.so
 ```
-./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so
+# ./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so
 15367360
 ```
 
 * Example 16: When executing libtest of libtest.so, execute dlclose and uninstall libtestnew.so
 ```
-./hookso trigger 11234 libtest.so libtest dlclose 15367360
+# ./hookso trigger 11234 libtest.so libtest dlclose 15367360
 15367360
 ```
 * Example 17: View the function parameter value of a certain address, such as the address obtained by find, or the address obtained by other means
@@ -326,10 +326,42 @@ The last parameter 1 represents the first parameter. Because test is looping +1,
 
 * Example 18: When executing a function at a certain address, execute syscall and output haha ​​on the screen
 ```
-./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
+# ./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
 4
 ```
 Other triggerp parameters are the same as trigger, so I won’t repeat them
+* Example 19: Obtain the libtest function address of libtest.so through other methods (such as gdb), and modify it to jump to libtestnew of libtestnew
+```
+# gdb -p 11234 -ex "p (long)libtest" --batch | grep "$1 = "| awk'{print $3}'
+4196064
+# ./hookso replacep 11234 4196064 ./test/libtestnew.so libtestnew
+23030976 6295592 140220482557656
+```
+The output here represents the old value of handle, address, and address, and then observe the output of test, you can see that the result of libtestnew is output
+```
+libtest 8
+libtest 9
+libtest 10
+libtestnew 11
+libtestnew 12
+libtestnew 13
+libtestnew 14
+```
+* Example 20: Use the old value output by replacep to restore the modification of replacep
+```
+# ./hookso setfuncp 20005 6295592 140220482557656
+139906556569240
+```
+Then observe the output of test, you can see that the output has been restored
+```
+libtestnew 32
+libtestnew 33
+libtestnew 34
+libtestnew 35
+libtest 36
+libtest 37
+libtest 38
+```
 
 # Usage
 ```
@@ -355,8 +387,14 @@ open .so and call function and close:
 replace src.so old-function to target.so new-function: 
 # ./hookso replace pid src-so src-func target-so-path target-func 
 
+replace target-function-addr to target.so new-function: 
+# ./hookso replacep pid func-addr target-so-path target-func 
+
 set target.so target-function new value : 
 # ./hookso setfunc pid target-so target-func value 
+
+set target-function-addr new value : 
+# ./hookso setfuncp pid func-addr value 
 
 find target.so target-function : 
 # ./hookso find pid target-so target-func 
@@ -383,7 +421,7 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ```
 
 # QA
-##### Why is there a main.cpp of 2K lines?
+##### Why is there a main.cpp of 2K+ lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
 Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions, or turn on debugging

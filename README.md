@@ -13,8 +13,8 @@ hookso是一个linux动态链接库的注入修改查找工具，用来修改其
 * 让某个进程执行.so的某个函数
 * 给某个进程挂接新的.so
 * 卸载某个进程的.so
-* 把旧.so的函数替换为新.so的函数
-* 复原.so的函数替换
+* 把旧.so的函数或某个地址替换为新.so的函数
+* 复原.so的函数或某个地址的替换
 * 查找.so的函数地址
 * 查看.so的函数参数，或某个地址的函数参数
 * 当执行.so的某个函数时或某个地址的函数时，触发执行新的函数
@@ -267,7 +267,7 @@ libtest 32
 
 * 示例12：当执行libtest.so的libtest时，执行syscall，在屏幕上输出haha
 ```
-./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
+# ./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
 4
 ```
 然后观察test的输出，可以看到调用的输出
@@ -280,7 +280,7 @@ libtest 524
 
 * 示例13：当执行libtest.so的libtest时，执行call，用相同的参数调用一次libtest函数
 ```
-./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
+# ./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
 0
 ```
 然后观察test的输出，可以看到输出了两次818
@@ -295,7 +295,7 @@ libtest 820
 
 * 示例14：当执行libtest.so的libtest时，执行dlcall，用相同的参数调用一次libtestnew.so的libtestnew函数
 ```
-./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
+# ./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
 0
 ```
 然后观察test的输出，可以看到输出了libtestnew的结果
@@ -309,13 +309,13 @@ libtest 975
 
 * 示例15：当执行libtest.so的libtest时，执行dlopen，注入libtestnew.so
 ```
-./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so  
+# ./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so  
 15367360
 ```
 
 * 示例16：当执行libtest.so的libtest时，执行dlclose，卸载libtestnew.so
 ```
-./hookso trigger 11234 libtest.so libtest dlclose 15367360
+# ./hookso trigger 11234 libtest.so libtest dlclose 15367360
 15367360
 ```
 
@@ -330,10 +330,43 @@ libtest 975
 
 * 示例18：当执行某个地址的函数时，执行syscall，在屏幕上输出haha
 ```
-./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
+# ./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
 4
 ```
 其他triggerp的参数，与trigger相同，不再赘述
+
+* 示例19：通过其他方式（如gdb）获得libtest.so的libtest函数地址，修改其跳转到libtestnew的libtestnew
+```
+# gdb -p 11234 -ex "p (long)libtest" --batch | grep "$1 = " | awk '{print $3}'
+4196064
+# ./hookso replacep 11234 4196064 ./test/libtestnew.so libtestnew
+23030976        6295592 140220482557656
+```
+这里的输出分别代表handle、地址、地址的旧值，然后观察test的输出，可以看到输出了libtestnew的结果
+```
+libtest 8
+libtest 9
+libtest 10
+libtestnew 11
+libtestnew 12
+libtestnew 13
+libtestnew 14
+```
+* 示例20：使用replacep输出的旧值，还原replacep的修改
+```
+# ./hookso setfuncp 20005 6295592 140220482557656
+139906556569240
+```
+然后观察test的输出，可以看到输出已经还原
+```
+libtestnew 32
+libtestnew 33
+libtestnew 34
+libtestnew 35
+libtest 36
+libtest 37
+libtest 38
+```
 
 # 用法
 ```
@@ -359,8 +392,14 @@ open .so and call function and close:
 replace src.so old-function to target.so new-function: 
 # ./hookso replace pid src-so src-func target-so-path target-func 
 
+replace target-function-addr to target.so new-function: 
+# ./hookso replacep pid func-addr target-so-path target-func 
+
 set target.so target-function new value : 
 # ./hookso setfunc pid target-so target-func value 
+
+set target-function-addr new value : 
+# ./hookso setfuncp pid func-addr value 
 
 find target.so target-function : 
 # ./hookso find pid target-so target-func 
