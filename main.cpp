@@ -1912,6 +1912,11 @@ int program_replace(int argc, char **argv) {
             return -1;
         }
 
+        if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
+            ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
+            return -1;
+        }
+
         int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
 
         char code[8] = {0};
@@ -2041,6 +2046,11 @@ int program_replacep(int argc, char **argv) {
         printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
 
     } else {
+
+        if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
+            ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
+            return -1;
+        }
 
         uint64_t offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
         LOG("jump offset=%llu", offset);
