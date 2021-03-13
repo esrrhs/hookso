@@ -1012,6 +1012,55 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
     return 0;
 }
 
+int get_mem_mapping(int pid, std::vector <std::pair<uint64_t, uint64_t>> &mapping) {
+
+    mapping.clear();
+
+    char maps_path[PATH_MAX];
+    sprintf(maps_path, "/proc/%d/maps", pid);
+    FILE *fd = fopen(maps_path, "r");
+    if (!fd) {
+        ERR("cannot open the memory maps, %s", strerror(errno));
+        return -1;
+    }
+
+    char buf[PROCMAPS_LINE_MAX_LENGTH];
+    while (!feof(fd)) {
+        if (fgets(buf, PROCMAPS_LINE_MAX_LENGTH, fd) == NULL) {
+            break;
+        }
+
+        std::vector <std::string> tmp;
+
+        const char *sep = "\t \r\n";
+        char *line = NULL;
+        for (char *token = strtok_r(buf, sep, &line); token != NULL; token = strtok_r(NULL, sep, &line)) {
+            tmp.push_back(token);
+        }
+
+        if (tmp.empty()) {
+            continue;
+        }
+
+        std::string range = tmp[0];
+        int pos = range.find_last_of("-");
+        if (pos == -1) {
+            continue;
+        }
+
+        std::string beginstr = range.substr(0, pos);
+        std::string endstr = range.substr(pos + 1);
+
+        uint64_t begin = (uint64_t) std::strtoul(beginstr.c_str(), 0, 16);
+        uint64_t end = (uint64_t) std::strtoul(endstr.c_str(), 0, 16);
+        mapping.push_back(std::make_pair(begin, end));
+    }
+
+    fclose(fd);
+
+    return 0;
+}
+
 std::string glibcname = "";
 char *gpcalladdr = 0;
 uint64_t gbackupcode = 0;
@@ -1254,6 +1303,227 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
     if (ret < 0) {
         return -1;
     }
+
+    return 0;
+}
+
+#pragma pack(1)
+struct GlobalMemHead {
+    uint64_t magic;
+    char magic_name[8];
+    uint64_t curlen;
+    uint64_t maxlen;
+};
+struct GlobalMemBody {
+    char name[8];
+    uint64_t key;
+    uint64_t len;
+    uint64_t value[0];
+};
+struct GlobalMem {
+    GlobalMemHead head;
+    GlobalMemBody body[1];
+};
+const uint64_t GLOBAL_MEM_HEAD_MAGIC = 0xdead0dad0dadbeef;
+const char GLOBAL_MEM_HEAD_MAGIC_NAME[] = "hookso00";
+#pragma pack(1)
+
+int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len, void *&targetaddr, int &targetlen) {
+    char name[8];
+    name[sizeof(name) - 1] = 0;
+    strncpy(name, namestr.c_str(), sizeof(name) - 1);
+
+    int pagesize = sysconf(_SC_PAGESIZE);
+
+    if (sizeof(GlobalMemHead) + sizeof(GlobalMemBody) + len > pagesize) {
+        ERR("alloc_global_mem fail len %d too big, pagesize is %d", len, pagesize);
+        return -1;
+    }
+
+    std::vector <std::pair<uint64_t, uint64_t>> mapping;
+    int ret = get_mem_mapping(pid, mapping);
+    if (ret < 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < (int) mapping.size(); ++i) {
+        if (mapping[i].first >= 0xFFFFFFFF || mapping[i].second >= 0xFFFFFFFF) {
+            continue;
+        }
+
+        for (uint64_t mapping_start = mapping[i].first; mapping_start < mapping[i].second; mapping_start += pagesize) {
+
+            GlobalMemHead head;
+            ret = remote_process_read(pid, (void *) mapping_start, &head, sizeof(head));
+            if (ret != 0) {
+                return -1;
+            }
+
+            if (head.magic != GLOBAL_MEM_HEAD_MAGIC ||
+                memcmp(head.magic_name, GLOBAL_MEM_HEAD_MAGIC_NAME, sizeof(head.magic_name)) != 0) {
+                LOG("get_mem_mapping diff head %llu %llu", mapping_start, mapping[i].second);
+                continue;
+            }
+
+            void *p = malloc(pagesize);
+            ret = remote_process_read(pid, (void *) mapping_start, p, pagesize);
+            if (ret != 0) {
+                free(p);
+                return -1;
+            }
+
+            GlobalMem *gm = (GlobalMem *) p;
+            for (int i = sizeof(gm->head); i < (int) gm->head.curlen && i < (int) gm->head.maxlen;) {
+                GlobalMemBody *body = (GlobalMemBody *) ((uint64_t) gm + i);
+                if (body->key == (uint64_t) key && memcmp(body->name, name, sizeof(body->name)) == 0) {
+                    targetaddr = (void *) (mapping_start + i + sizeof(GlobalMemBody));
+                    targetlen = body->len - sizeof(GlobalMemBody);
+                    LOG("get_mem_mapping find old one %llu %d %p %d", mapping_start, i, targetaddr, targetlen);
+                    free(p);
+                    return 0;
+                }
+                i += body->len;
+                LOG("get_mem_mapping find old diff %llu %llu %llu", body->key, gm->head.curlen, body->len);
+            }
+
+            free(p);
+        }
+    }
+
+    LOG("get_mem_mapping not find old one, start alloc");
+
+    for (int i = 0; i < (int) mapping.size(); ++i) {
+        if (mapping[i].first >= 0xFFFFFFFF || mapping[i].second >= 0xFFFFFFFF) {
+            continue;
+        }
+
+        for (uint64_t mapping_start = mapping[i].first; mapping_start < mapping[i].second; mapping_start += pagesize) {
+            GlobalMemHead head;
+            ret = remote_process_read(pid, (void *) mapping_start, &head, sizeof(head));
+            if (ret != 0) {
+                return -1;
+            }
+
+            if (head.magic != GLOBAL_MEM_HEAD_MAGIC ||
+                memcmp(head.magic_name, GLOBAL_MEM_HEAD_MAGIC_NAME, sizeof(head.magic_name)) != 0) {
+                LOG("get_mem_mapping diff head %llu %llu", mapping_start, mapping[i].second);
+                continue;
+            }
+
+            void *p = malloc(pagesize);
+            ret = remote_process_read(pid, (void *) mapping_start, p, pagesize);
+            if (ret != 0) {
+                free(p);
+                return -1;
+            }
+
+            GlobalMem *gm = (GlobalMem *) p;
+            if (gm->head.curlen + len + sizeof(GlobalMemBody) > gm->head.maxlen) {
+                free(p);
+                LOG("get_mem_mapping full head %llu", mapping_start);
+                continue;
+            }
+
+            GlobalMemBody *body = (GlobalMemBody *) ((uint64_t) gm + gm->head.curlen);
+            memcpy(body->name, name, sizeof(body->name));
+            body->key = key;
+            body->len = len + sizeof(GlobalMemBody);
+
+            ret = remote_process_write(pid, (void *) (mapping_start + gm->head.curlen), body, sizeof(GlobalMemBody));
+            if (ret != 0) {
+                free(p);
+                return -1;
+            }
+
+            int targetpos = gm->head.curlen;
+            gm->head.curlen += body->len;
+
+            ret = remote_process_write(pid, (void *) (mapping_start), gm, sizeof(GlobalMemHead));
+            if (ret != 0) {
+                free(p);
+                return -1;
+            }
+
+            targetaddr = (void *) (mapping_start + targetpos + sizeof(GlobalMemBody));
+            targetlen = len;
+
+            LOG("get_mem_mapping find new one %llu %p %d", mapping_start, targetaddr, targetlen);
+            free(p);
+
+            return 0;
+        }
+    }
+
+    LOG("get_mem_mapping not alloc from old, start alloc new page");
+
+    uint64_t find = (uint64_t) 0x00400000;
+    for (int i = 0; i < (int) mapping.size(); ++i) {
+        if (mapping[i].first >= 0xFFFFFFFF || mapping[i].second >= 0xFFFFFFFF) {
+            continue;
+        }
+
+        if (find >= mapping[i].first && find < mapping[i].second) {
+            find = mapping[i].second;
+            continue;
+        }
+
+        break;
+    }
+
+    if (find == (uint64_t) 0x00400000) {
+        ERR("alloc_global_mem fail can no find page");
+        return -1;
+    }
+
+    LOG("get_mem_mapping alloc new page at %p", (void *) find);
+
+    uint64_t retval = 0;
+    ret = syscall_so(pid, retval, syscall_sys_mmap, find, pagesize, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ret != 0) {
+        return -1;
+    }
+    if (retval == (uint64_t)(-1)) {
+        return -1;
+    }
+
+    LOG("get_mem_mapping alloc new page return %p", (void *) retval);
+
+    uint64_t mapping_start = retval;
+
+    void *p = malloc(pagesize);
+
+    GlobalMem *gm = (GlobalMem *) p;
+    gm->head.magic = GLOBAL_MEM_HEAD_MAGIC;
+    memcpy(gm->head.magic_name, GLOBAL_MEM_HEAD_MAGIC_NAME, sizeof(gm->head.magic_name));
+    gm->head.curlen = sizeof(GlobalMemHead);
+    gm->head.maxlen = pagesize;
+
+    GlobalMemBody *body = (GlobalMemBody *) ((uint64_t) gm + sizeof(gm->head));
+    memcpy(body->name, name, sizeof(body->name));
+    body->key = key;
+    body->len = len + sizeof(GlobalMemBody);
+
+    ret = remote_process_write(pid, (void *) (mapping_start + gm->head.curlen), body, sizeof(GlobalMemBody));
+    if (ret != 0) {
+        free(p);
+        return -1;
+    }
+
+    int targetpos = gm->head.curlen;
+    gm->head.curlen += body->len;
+
+    ret = remote_process_write(pid, (void *) (mapping_start), gm, sizeof(GlobalMemHead));
+    if (ret != 0) {
+        free(p);
+        return -1;
+    }
+
+    targetaddr = (void *) (mapping_start + targetpos + sizeof(GlobalMemBody));
+    targetlen = len;
+
+    LOG("get_mem_mapping alloc new one %llu %p %d", mapping_start, targetaddr, targetlen);
+    free(p);
 
     return 0;
 }
@@ -1549,6 +1819,7 @@ int program_dlcall_impl(int pid, const std::string &targetso, const std::string 
     void *target_funcaddr = 0;
     ret = find_so_func_addr(pid, targetso.c_str(), targetfunc.c_str(), target_funcaddr_plt, target_funcaddr);
     if (ret != 0) {
+        close_so(pid, handle);
         return -1;
     }
 
@@ -1557,9 +1828,11 @@ int program_dlcall_impl(int pid, const std::string &targetso, const std::string 
     uint64_t retval = 0;
     ret = funccall_so(pid, retval, target_funcaddr, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
     if (ret != 0) {
+        close_so(pid, handle);
         return -1;
     }
     if (retval == (uint64_t)(-1)) {
+        close_so(pid, handle);
         return -1;
     }
 
@@ -1844,7 +2117,7 @@ int program_setfuncp(int argc, char **argv) {
         return -1;
     }
 
-    LOG("set text func %s %s ok from %p to %lu", targetso.c_str(), targetfunc.c_str(), old_funcaddr, value);
+    LOG("set text func from %p to %lu", old_funcaddr, value);
     printf("%lu\n", backup);
 
     return 0;
@@ -1914,6 +2187,7 @@ int program_replace(int argc, char **argv) {
 
         if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
             ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
+            close_so(pid, handle);
             return -1;
         }
 
@@ -1928,6 +2202,7 @@ int program_replace(int argc, char **argv) {
         ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
         if (ret < 0) {
             ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            close_so(pid, handle);
             return -1;
         }
 
@@ -1937,6 +2212,7 @@ int program_replace(int argc, char **argv) {
             (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
             ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
                 (uint64_t) oldregs.rip);
+            close_so(pid, handle);
             return -1;
         }
 
@@ -2045,25 +2321,33 @@ int program_replacep(int argc, char **argv) {
             targetfunc.c_str(), new_funcaddr);
         printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
 
-    } else {
+    } else if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
 
-        if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
-            ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
+        void *far_jmpq_addr_pointer = 0;
+        int far_jmpq_addr_pointer_len = 0;
+        ret = alloc_global_mem(pid, "replace", (uint64_t) old_funcaddr, sizeof(new_funcaddr), far_jmpq_addr_pointer,
+                               far_jmpq_addr_pointer_len);
+        if (ret < 0) {
+            close_so(pid, handle);
             return -1;
         }
 
-        uint64_t offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
-        LOG("jump offset=%llu", offset);
+        LOG("far jump addr pointer=%p", far_jmpq_addr_pointer);
+
+        int offset = (int) ((uint64_t) far_jmpq_addr_pointer - (uint64_t) old_funcaddr - 6);
+        LOG("far jump offset=%d", offset);
 
         char code[8] = {0};
-        code[0] = 0xe9;
-        memcpy(&code[1], &new_funcaddr, sizeof(new_funcaddr));
+        code[0] = 0xff;
+        code[1] = 0x25;
+        memcpy(&code[2], &offset, sizeof(offset));
 
         // check
         struct user_regs_struct oldregs;
         ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
         if (ret < 0) {
             ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            close_so(pid, handle);
             return -1;
         }
 
@@ -2073,6 +2357,50 @@ int program_replacep(int argc, char **argv) {
             (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
             ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
                 (uint64_t) oldregs.rip);
+            close_so(pid, handle);
+            return -1;
+        }
+
+        ret = remote_process_write(pid, far_jmpq_addr_pointer, &new_funcaddr, sizeof(new_funcaddr));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        if (ret != 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        LOG("replace far text func ok from %s=%p to %s %s=%p", srcaddr.c_str(), old_funcaddr, targetso.c_str(),
+            targetfunc.c_str(), new_funcaddr);
+        printf("%lu\t%lu\t%lu\n", handle, (uint64_t) old_funcaddr, backup);
+
+    } else {
+
+        int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
+
+        char code[8] = {0};
+        code[0] = 0xe9;
+        memcpy(&code[1], &offset, sizeof(offset));
+
+        // check
+        struct user_regs_struct oldregs;
+        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            close_so(pid, handle);
+            return -1;
+        }
+
+        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
+            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
+            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
+                (uint64_t) oldregs.rip);
+            close_so(pid, handle);
             return -1;
         }
 

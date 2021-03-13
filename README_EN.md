@@ -330,7 +330,7 @@ The last parameter 1 represents the first parameter. Because test is looping +1,
 4
 ```
 Other triggerp parameters are the same as trigger, so I won’t repeat them
-* Example 19: Obtain the libtest function address of libtest.so through other methods (such as gdb), and modify it to jump to libtestnew of libtestnew
+* Example 19: Obtain the libtest function address of libtest.so through other methods (such as gdb), and modify it to jump to libtestnew of libtestnew.so
 ```
 # gdb -p 11234 -ex "p (long)libtest" --batch | grep "$1 = "| awk'{print $3}'
 4196064
@@ -362,6 +362,27 @@ libtest 36
 libtest 37
 libtest 38
 ```
+* Example 21: Obtain the address of the mysleep function of test through other methods (such as gdb), and modify it to jump to mysleepnew of libtestnew.so
+```
+# gdb -p 11234 -ex "p (long)mysleep" --batch | grep "$1 = "| awk'{print $3}'
+4196356
+# ./hookso replacep 11234 4196356 ./test/libtestnew.so mysleepnew
+23030976 4196356 1923701360725
+```
+This is similar to Example 19, but here is to jump the native low-address function mysleep of test to the high-address function mysleepnew in so. The internal implementation mechanism is not the same. Observe the output of test
+```
+libtest 28
+libtest 29
+libtest 30
+libtest 31
+mysleepnew
+libtest 32
+mysleepnew
+libtest 33
+mysleepnew
+libtest 34
+```
+You can see that mysleepnew has taken effect
 
 # Usage
 ```

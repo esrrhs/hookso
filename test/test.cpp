@@ -6,6 +6,10 @@
 
 extern "C" bool libtest(int n);  //from libtest.so
 
+extern "C" void mysleep() {
+    sleep(1);
+}
+
 int main() {
     void *handle = dlopen(LIBTEST_PATH, RTLD_LAZY);
 
@@ -17,7 +21,7 @@ int main() {
         if (libtest(n++)) {
             break;
         }
-        sleep(1);
+        mysleep();
     }
 
     dlclose(handle);
