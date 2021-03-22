@@ -153,7 +153,7 @@ int remote_process_ptrace_word_read(int remote_pid, void *address, void *buffer,
     return 0;
 }
 
-int remote_process_read(int remote_pid, void *address, void *buffer, size_t len) {
+int remote_process_read(int remote_pid, void *address, void *buffer, size_t len, bool silent = false) {
     int ret = 0;
     ret = remote_process_vm_readv(remote_pid, address, buffer, len);
     if (ret == 0) {
@@ -167,7 +167,10 @@ int remote_process_read(int remote_pid, void *address, void *buffer, size_t len)
     if (ret == 0) {
         return ret;
     }
-    ERR("remote_process_read fail %p %d %s", address, ret, strerror(ret));
+
+    if (!silent) {
+        ERR("remote_process_read fail %p %d %s", address, ret, strerror(ret));
+    }
     return ret;
 }
 
@@ -1580,6 +1583,62 @@ int free_so_string_mem(int pid, void *targetaddr, int targetlen) {
     return 0;
 }
 
+int get_callstack_func(int pid, std::vector <uint64_t> &cs) {
+
+    struct user_regs_struct oldregs;
+    int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_GETREGS fail", pid);
+        return -1;
+    }
+
+    uint64_t ip = (uint64_t) oldregs.rip;
+    uint64_t bp = (uint64_t) oldregs.rbp;
+
+    cs.clear();
+    cs.push_back(ip);
+    LOG("get_callstack_func %p", (void *) ip);
+
+    while (true) {
+
+        void *caller_bp_pointer = (void *) (bp);
+        uint64_t caller_bp = 0;
+        ret = remote_process_read(pid, caller_bp_pointer, &caller_bp, sizeof(caller_bp), true);
+        if (ret != 0 || caller_bp == 0) {
+            break;
+        }
+
+        void *caller_func_pos = (void *) (bp + sizeof(uint64_t * ));
+        uint64_t caller_func = 0;
+        ret = remote_process_read(pid, caller_func_pos, &caller_func, sizeof(caller_func), true);
+        if (ret != 0 || caller_func == 0) {
+            break;
+        }
+
+        bp = caller_bp;
+        cs.push_back(caller_func);
+        LOG("get_callstack_func %p", (void *) caller_func);
+    }
+
+    return 0;
+}
+
+int check_callstack_func_running(int pid, uint64_t modify_ip, int range, bool &running) {
+    std::vector <uint64_t> cs;
+    running = false;
+    int ret = get_callstack_func(pid, cs);
+    if (ret != 0) {
+        return -1;
+    }
+    for (int i = 0; i < (int) cs.size(); ++i) {
+        if (cs[i] >= modify_ip && cs[i] <= modify_ip + range) {
+            running = true;
+            break;
+        }
+    }
+    return 0;
+}
+
 int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
 
     char abspath[PATH_MAX];
@@ -2208,10 +2267,15 @@ int program_replace(int argc, char **argv) {
 
         LOG("cur rip=%lu", (uint64_t) oldregs.rip);
 
-        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
-            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
-            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
-                (uint64_t) oldregs.rip);
+        bool running = false;
+        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+        if (ret < 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        if (running) {
+            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
             close_so(pid, handle);
             return -1;
         }
@@ -2353,10 +2417,15 @@ int program_replacep(int argc, char **argv) {
 
         LOG("cur rip=%lu", (uint64_t) oldregs.rip);
 
-        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
-            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
-            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
-                (uint64_t) oldregs.rip);
+        bool running = false;
+        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+        if (ret < 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        if (running) {
+            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
             close_so(pid, handle);
             return -1;
         }
@@ -2396,10 +2465,15 @@ int program_replacep(int argc, char **argv) {
 
         LOG("cur rip=%lu", (uint64_t) oldregs.rip);
 
-        if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
-            (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(code)) {
-            ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
-                (uint64_t) oldregs.rip);
+        bool running = false;
+        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+        if (ret < 0) {
+            close_so(pid, handle);
+            return -1;
+        }
+
+        if (running) {
+            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
             close_so(pid, handle);
             return -1;
         }
@@ -2458,10 +2532,14 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
     // nop
     memset(&code[1], 0x90, sizeof(code) - 1);
 
-    if ((uint64_t) oldregs.rip >= (uint64_t) old_funcaddr &&
-        (uint64_t) oldregs.rip <= (uint64_t) old_funcaddr + sizeof(newcode)) {
-        ERR("%d target func %p %u is running at %u, try again", pid, old_funcaddr, (uint64_t) old_funcaddr,
-            (uint64_t) oldregs.rip);
+    bool running = false;
+    ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+    if (ret < 0) {
+        return -1;
+    }
+
+    if (running) {
+        ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
         return -1;
     }
 
