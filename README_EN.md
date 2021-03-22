@@ -442,7 +442,7 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ```
 
 # QA
-##### Why is there a main.cpp of 2K+ lines?
+##### Why is there a main.cpp of 3K+ lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
 Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions, or turn on debugging

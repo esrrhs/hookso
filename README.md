@@ -447,7 +447,7 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ```
 
 # QA
-##### 为什么就一个2k行+的main.cpp?
+##### 为什么就一个3k行+的main.cpp?
 因为东西简单，减少无谓的封装，增加可读性
 ##### 这东西实际有什么作用？
 如同瑞士军刀一样，用处很多。可以用来热更新，或者监控某些函数行为，或者开启调试
