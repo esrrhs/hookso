@@ -468,3 +468,5 @@ As you can see, the find command has been successfully executed, the same is tru
 [Lua performance analysis tool](https://github.com/esrrhs/pLua)
 
 [Lua debug tool](https://github.com/esrrhs/dlua)
+
+[Lua watch tool](https://github.com/esrrhs/wlua)
