@@ -318,7 +318,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
             break;
         }
 
-        std::vector <std::string> tmp;
+        std::vector<std::string> tmp;
 
         const char *sep = "\t \r\n";
         char *line = NULL;
@@ -624,7 +624,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
             break;
         }
 
-        std::vector <std::string> tmp;
+        std::vector<std::string> tmp;
 
         const char *sep = "\t \r\n";
         char *line = NULL;
@@ -959,7 +959,7 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
             break;
         }
 
-        std::vector <std::string> tmp;
+        std::vector<std::string> tmp;
 
         const char *sep = "\t \r\n";
         char *line = NULL;
@@ -1015,7 +1015,7 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
     return 0;
 }
 
-int get_mem_mapping(int pid, std::vector <std::pair<uint64_t, uint64_t>> &mapping) {
+int get_mem_mapping(int pid, std::vector<std::pair<uint64_t, uint64_t>> &mapping) {
 
     mapping.clear();
 
@@ -1033,7 +1033,7 @@ int get_mem_mapping(int pid, std::vector <std::pair<uint64_t, uint64_t>> &mappin
             break;
         }
 
-        std::vector <std::string> tmp;
+        std::vector<std::string> tmp;
 
         const char *sep = "\t \r\n";
         char *line = NULL;
@@ -1097,9 +1097,9 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
     // setup registers
     struct user_regs_struct regs = oldregs;
     regs.rip = (uint64_t) gpcalladdr;
-    regs.rbp = (uint64_t)(gpcallstack + callstack_len - 16);
+    regs.rbp = (uint64_t) (gpcallstack + callstack_len - 16);
     // rsp must be aligned to a 16-byte boundary
-    regs.rsp = (uint64_t)(gpcallstack + callstack_len - (2 * 16));
+    regs.rsp = (uint64_t) (gpcallstack + callstack_len - (2 * 16));
     regs.rax = (uint64_t) funcaddr;
     regs.rdi = arg1;
     regs.rsi = arg2;
@@ -1343,7 +1343,7 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
         return -1;
     }
 
-    std::vector <std::pair<uint64_t, uint64_t>> mapping;
+    std::vector<std::pair<uint64_t, uint64_t>> mapping;
     int ret = get_mem_mapping(pid, mapping);
     if (ret < 0) {
         return -1;
@@ -1486,7 +1486,7 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -1544,7 +1544,7 @@ int alloc_so_string_mem(int pid, const std::string &str, void *&targetaddr, int 
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -1563,7 +1563,7 @@ int alloc_so_string_mem(int pid, const std::string &str, void *&targetaddr, int 
     return 0;
 }
 
-int free_so_string_mem(int pid, void *targetaddr, int targetlen) {
+int free_so_string_mem(int pid, void *targetaddr, int targetlen, bool erasemap = true) {
 
     LOG("start syscall sys_munmap %p %d", targetaddr, targetlen);
 
@@ -1572,18 +1572,20 @@ int free_so_string_mem(int pid, void *targetaddr, int targetlen) {
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
-    gallocmem.erase((uint64_t) targetaddr);
+    if (erasemap) {
+        gallocmem.erase((uint64_t) targetaddr);
+    }
 
     LOG("syscall sys_munmap ok %p %d", targetaddr, targetlen);
 
     return 0;
 }
 
-int get_callstack_func(int pid, std::vector <uint64_t> &cs) {
+int get_callstack_func(int pid, std::vector<uint64_t> &cs) {
 
     struct user_regs_struct oldregs;
     int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
@@ -1608,7 +1610,7 @@ int get_callstack_func(int pid, std::vector <uint64_t> &cs) {
             break;
         }
 
-        void *caller_func_pos = (void *) (bp + sizeof(uint64_t * ));
+        void *caller_func_pos = (void *) (bp + sizeof(uint64_t *));
         uint64_t caller_func = 0;
         ret = remote_process_read(pid, caller_func_pos, &caller_func, sizeof(caller_func), true);
         if (ret != 0 || caller_func == 0) {
@@ -1624,7 +1626,7 @@ int get_callstack_func(int pid, std::vector <uint64_t> &cs) {
 }
 
 int check_callstack_func_running(int pid, uint64_t modify_ip, int range, bool &running) {
-    std::vector <uint64_t> cs;
+    std::vector<uint64_t> cs;
     running = false;
     int ret = get_callstack_func(pid, cs);
     if (ret != 0) {
@@ -1669,7 +1671,7 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -1791,7 +1793,7 @@ int close_so(int pid, uint64_t handle) {
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -1890,7 +1892,7 @@ int program_dlcall_impl(int pid, const std::string &targetso, const std::string 
         close_so(pid, handle);
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         close_so(pid, handle);
         return -1;
     }
@@ -1956,7 +1958,7 @@ int program_call_impl(int pid, const std::string &targetso, const std::string &t
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -2007,7 +2009,7 @@ int program_syscall_impl(int pid, int syscallno, uint64_t arg[]) {
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
 
@@ -2359,7 +2361,7 @@ int program_replacep(int argc, char **argv) {
     }
 
     // check is got
-    uint8_t *backup_code = (uint8_t * ) & backup;
+    uint8_t *backup_code = (uint8_t *) &backup;
     if ((uint64_t) old_funcaddr < (uint64_t) 0xFFFFFFFF && backup_code[0] == (uint8_t) 0xFF &&
         backup_code[1] == (uint8_t) 0x25 && // jmpq   *0x200912(%rip)
         backup_code[6] == (uint8_t) 0x68) { // pushq  $0x2
@@ -2916,7 +2918,7 @@ int ini_hookso_env(int pid) {
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t)(-1)) {
+    if (retval == (uint64_t) (-1)) {
         return -1;
     }
     gpcallstack = (char *) retval;
@@ -2931,8 +2933,9 @@ int ini_hookso_env(int pid) {
 int fini_hookso_env(int pid) {
 
     for (const auto &kv : gallocmem) {
-        free_so_string_mem(pid, (void *) kv.first, kv.second);
+        free_so_string_mem(pid, (void *) kv.first, kv.second, false);
     }
+    gallocmem.clear();
 
     uint64_t retval = 0;
     syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
