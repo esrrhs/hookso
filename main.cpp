@@ -483,7 +483,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
         Elf64_Sym &s = sym[j];
         std::string name = &dynstr[s.st_name];
-        if (name == funcname && ELF64_ST_TYPE(s.st_info) == STT_FUNC) {
+        if (name == funcname && (ELF64_ST_TYPE(s.st_info) == STT_FUNC || ELF64_ST_TYPE(s.st_info) == STT_NOTYPE)) {
             symfuncindex = j;
             break;
         }
@@ -804,7 +804,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     for (int j = 0; j < (int) (dynsymsection.sh_size / sizeof(Elf64_Sym)); ++j) {
         Elf64_Sym &s = sym[j];
         std::string name = &dynstr[s.st_name];
-        if (name == funcname && ELF64_ST_TYPE(s.st_info) == STT_FUNC) {
+        if (name == funcname && (ELF64_ST_TYPE(s.st_info) == STT_FUNC || ELF64_ST_TYPE(s.st_info) == STT_NOTYPE)) {
             symfuncindex = j;
             break;
         }
