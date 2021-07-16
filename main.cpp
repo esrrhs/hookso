@@ -1142,7 +1142,7 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
-            } else if (WSTOPSIG(status) == SIGALRM) {
+            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
@@ -1258,7 +1258,7 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
-            } else if (WSTOPSIG(status) == SIGALRM) {
+            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
@@ -2586,7 +2586,7 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
             if (WSTOPSIG(status) == SIGTRAP) {
                 // ok
                 break;
-            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGCHLD) {
+            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
