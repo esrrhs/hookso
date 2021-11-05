@@ -2246,7 +2246,7 @@ int program_replace(int argc, char **argv) {
             return -1;
         }
 
-        if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
+        if (std::abs((int64_t) new_funcaddr - ((int64_t) old_funcaddr + 5)) > (int64_t) 0xFFFFFFFF) {
             ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
             close_so(pid, handle);
             return -1;
@@ -2387,7 +2387,7 @@ int program_replacep(int argc, char **argv) {
             targetfunc.c_str(), new_funcaddr);
         printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
 
-    } else if ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5) > (uint64_t) 0xFFFFFFFF) {
+    } else if (std::abs((int64_t) new_funcaddr - ((int64_t) old_funcaddr + 5)) > (int64_t) 0xFFFFFFFF) {
 
         void *far_jmpq_addr_pointer = 0;
         int far_jmpq_addr_pointer_len = 0;
@@ -2932,7 +2932,7 @@ int ini_hookso_env(int pid) {
 
 int fini_hookso_env(int pid) {
 
-    for (const auto &kv : gallocmem) {
+    for (const auto &kv: gallocmem) {
         free_so_string_mem(pid, (void *) kv.first, kv.second, false);
     }
     gallocmem.clear();
