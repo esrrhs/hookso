@@ -2,7 +2,7 @@
 
 [<img src="https://img.shields.io/github/license/esrrhs/hookso">](https://github.com/esrrhs/hookso)
 [<img src="https://img.shields.io/github/languages/top/esrrhs/hookso">](https://github.com/esrrhs/hookso)
-[<img src="https://img.shields.io/github/workflow/status/esrrhs/hookso/CI">](https://github.com/esrrhs/hookso/actions)
+[<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/hookso/ccpp.yml?branch=master">](https://github.com/esrrhs/hookso/actions)
 
 hookso是一个linux动态链接库的注入修改查找工具，用来修改其他进程的动态链接库行为。
 
