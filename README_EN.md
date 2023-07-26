@@ -349,7 +349,7 @@ libtestnew 14
 ```
 * Example 20: Use the old value output by replacep to restore the modification of replacep
 ```
-# ./hookso setfuncp 20005 6295592 140220482557656
+# ./hookso setfuncp 11234 6295592 140220482557656
 139906556569240
 ```
 Then observe the output of test, you can see that the output has been restored
