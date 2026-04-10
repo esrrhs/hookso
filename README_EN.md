@@ -4,21 +4,21 @@
 [<img src="https://img.shields.io/github/languages/top/esrrhs/hookso">](https://github.com/esrrhs/hookso)
 [<img src="https://img.shields.io/github/workflow/status/esrrhs/hookso/CI">](https://github.com/esrrhs/hookso/actions)
 
-Hookso is a Linux dynamic link library injection modification search tool, used to modify the dynamic link library behavior of other processes.
+Hookso is a Linux dynamic link library injection, modification, and search tool, used to modify the dynamic link library behavior of other processes.
 
 # Features
 * Let a process execute system calls
-* Let a process execute a function of .so
+* Let a process execute a function of a .so
 * Attach a new .so to a process
-* Uninstall a process of .so
+* Unload a .so from a process
 * Replace the function of the old .so or an address with the function of the new .so
 * Restore the function of .so or the replacement of an address
 * Find the function address of .so
 * View function parameters of .so, or function parameters of a certain address
-* When a function of .so or a function of a certain address is executed, the execution of a new function is triggered
+* When a function of .so or a function at a certain address is executed, trigger the execution of a new function
 
 # Compile
-Git clone code, run scripts, generate hookso and test programs
+git clone the code, run scripts, generate hookso and test programs
 ```
 # ./build.sh
 # cd test && ./build.sh
@@ -60,7 +60,7 @@ extern "C" bool libtest(int n) {
     return false;
 }
 ```
-At this time, test is not loaded with libtestnew.so, it will be injected with hookso later, the code of libtestnew.cpp is as follows
+At this point, test has not loaded libtestnew.so; it will be injected with hookso later, the code of libtestnew.cpp is as follows
 ```
 extern "C" bool libtestnew (int n) {
     char buff [128] = {0};
@@ -76,7 +76,7 @@ extern "C" bool putsnew (const char * str) {
     return false;
 }
 ```
-libtestnew.cpp defines two functions, one to replace the puts function of libtest.so and one to replace libtest.so
+libtestnew.cpp defines two functions, one to replace the puts function of libtest.so and one to replace the libtest function of libtest.so
 
 Now we start to compile and run it
 ```
@@ -128,7 +128,7 @@ libtest 1234 outputs the result for one call we inserted
 # ./hookso dlopen 11234 ./test/libtestnew.so
 13388992
 ```
-Note that the output here is 13388992, which means dlopen's handle, which will be used to uninstall so after this handle. Then check the system / proc / 11234 / maps
+Note that the output here is 13388992, which means dlopen's handle, which will be used later to unload the .so. Then check the system / proc / 11234 / maps
 ```
 # cat / proc / 11234 / maps
 00400000-00401000 r-xp 00000000 fc: 01 678978 / home / project / hookso / test / test
@@ -147,7 +147,7 @@ You can see that libtestnew.so has been successfully loaded
 # ./hookso dlclose 11234 13388992
 13388992
 ```
-This 13388992 is the handle value returned by dlopen in Example 3 (the value of dlopen is the same for many times, and dlclose must be dlclose multiple times before it can be unloaded) Then check the system / proc / 11234 / maps
+This 13388992 is the handle value returned by dlopen in Example 3 (calling dlopen multiple times returns the same value, and you must call dlclose the same number of times to actually unload it). Then check the system / proc / 11234 / maps
 ```
 # cat / proc / 16992 / maps
 00400000-00401000 r-xp 00000000 fc: 01 678978 / home / project / hookso / test / test
@@ -159,7 +159,7 @@ This 13388992 is the handle value returned by dlopen in Example 3 (the value of 
 7fb352964000-7fb352968000 r--p 001b9000 fc: 01 25054 /usr/lib64/libc-2.17.so
 7fb352968000-7fb35296a000 rw-p 001bd000 fc: 01 25054 /usr/lib64/libc-2.17.so
 ```
-You can see that libtestnew.so is useless
+You can see that libtestnew.so is no longer present
 
 * Example 5: Let test load libtestnew.so, execute libtestnew, and then uninstall libtestnew.so
 ```
@@ -175,9 +175,9 @@ libtestnew 1234
 libtest 154
 libtest 155
 ```
-libtestnew 1234 is the function libtestnew output of libtestnew.so, dlcall is equivalent to performing the previous three steps of dlopen, call, dlclose
+libtestnew 1234 is the output of the libtestnew function from libtestnew.so, dlcall is equivalent to performing the previous three steps of dlopen, call, dlclose
 
-* Example 6: Let test load libtestnew.so and modify the puts function of libtest.so to call puttestnew of libtestnew.so
+* Example 6: Let test load libtestnew.so and modify the puts function of libtest.so to call putsnew of libtestnew.so
 ```
 # ./hookso replace 11234 libtest.so puts ./test/libtestnew.so putsnew
 13388992 140573454638880
@@ -208,9 +208,9 @@ libtest 47
 libtest 48
 libtest 49
 ```
-Note that libnewtest.so is still in memory at this time, if you don't need it, you can use dlclose to uninstall it, and I won't repeat it here.
+Note that libtestnew.so is still in memory at this time, if you don't need it, you can use dlclose to unload it, and I won't repeat it here.
 
-* Example 8: Let test load libtestnew.so and jump the libtest function of libtest.so to libtestnew. The difference between this and example 6 is that libtest is a function implemented inside libtest.so and puts is a call to libtest.so. External function
+* Example 8: Let test load libtestnew.so and jump the libtest function of libtest.so to libtestnew. The difference between this and example 6 is that libtest is a function implemented inside libtest.so, while puts is a function called externally by libtest.so
 ```
 # ./hookso replace 2936 libtest.so libtest ./test/libtestnew.so libtestnew
 13388992 10442863786053945429
@@ -445,12 +445,12 @@ before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with par
 ##### Why is there a main.cpp of 3K+ lines?
 Because things are simple, reduce unnecessary packaging, increase readability
 ##### What does this thing actually do?
-Like the Swiss Army Knife, it is much more useful. Can be used to hot update, or monitor the behavior of certain functions, or turn on debugging
+Like a Swiss Army knife, it has many uses. Can be used for hot updates, monitoring the behavior of certain functions, or enabling debugging
 ##### What are the limitations of function calls?
 syscall, call, and dlcall only support function calls with a maximum of 6 parameters, and the parameters can only support integers and characters
-Replace is not limited, but you must ensure that the new function and the old function have the same parameters, otherwise they will core out
+Replace is not limited, but you must ensure that the new function and the old function have the same parameters, otherwise it will crash with a core dump
 ##### Some so functions will report errors?
-Some so is too large to be fully loaded into memory, resulting in unresolved and failed operation, such as
+Some so is too large to be fully loaded into memory, resulting in unresolved symbols and failed operations, such as
 ```
 # ./hookso find 11234 libstdc ++. so.6.0.28 __dynamic_cast
 [ERROR] [2020.4.28,14: 26: 55,161] main.cpp: 172, remote_process_read: remote_process_read fail 0x7fc375714760 5 Input / output error
