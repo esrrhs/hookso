@@ -2,7 +2,7 @@
 
 [<img src="https://img.shields.io/github/license/esrrhs/hookso">](https://github.com/esrrhs/hookso)
 [<img src="https://img.shields.io/github/languages/top/esrrhs/hookso">](https://github.com/esrrhs/hookso)
-[<img src="https://img.shields.io/github/workflow/status/esrrhs/hookso/CI">](https://github.com/esrrhs/hookso/actions)
+[<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/hookso/c-cpp.yml?branch=master">](https://github.com/esrrhs/hookso/actions)
 
 Hookso is a Linux dynamic link library injection, modification, and search tool, used to modify the dynamic link library behavior of other processes.
 
