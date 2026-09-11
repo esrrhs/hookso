@@ -4,474 +4,153 @@
 [<img src="https://img.shields.io/github/languages/top/esrrhs/hookso">](https://github.com/esrrhs/hookso)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/hookso/c-cpp.yml?branch=master">](https://github.com/esrrhs/hookso/actions)
 
-hookso是一个linux动态链接库的注入修改查找工具，用来修改其他进程的动态链接库行为。
+hookso uses `ptrace` to take over another process and, in that process's address space, run syscalls, load or unload `.so` files, look up symbols, and replace functions. It targets **x86-64 Linux**. The implementation lives in a single `main.cpp` so the control flow is easy to follow.
 
-[Readme EN](./README_EN.md)
+[中文](./README_ZH.md) · [Usage details](./README_USAGE.md)
 
-# 功能
-* 让某个进程执行系统调用
-* 让某个进程执行.so的某个函数
-* 给某个进程挂接新的.so
-* 卸载某个进程的.so
-* 把旧.so的函数或某个地址替换为新.so的函数
-* 复原.so的函数或某个地址的替换
-* 查找.so的函数地址
-* 查看.so的函数参数，或某个地址的函数参数
-* 当执行.so的某个函数时或某个地址的函数时，触发执行新的函数
+## What it can do
 
-# 编译
-git clone代码，运行脚本，生成hookso以及测试程序
-```
-# ./build.sh  
-# cd test && ./build.sh 
-```
+- Run a syscall in the target, or call a function in an already-loaded `.so`
+- `dlopen` / `dlclose` to attach or unload a library
+- Find a function address and read arguments of the next call
+- Replace an old function (or an arbitrary address) with a function from a new `.so`, and restore it later
+- When a target function is **about to run**, fire a syscall / call / dlopen / …
 
-# 示例
-* 启动test目录下的测试程序
+## How it works
 
-先看下测试代码，代码很简单，test.cpp不停的调用libtest.so的libtest函数
+hookso does not start a helper thread inside the target. It stops the process, writes a few instructions into memory that is already executable, points RIP at that stub, lets the target run the work itself, then restores the original bytes and registers.
 
-```
-int n = 0;
-while (1) {
-    if (libtest(n++)) {
-        break;
-    }
-    sleep(1);
-}
-```
-而libtest.so的libtest函数只是打印到标准输出。
-
-注意这里使用了几种不同的方式调用puts，原因是不同的写法，会导致puts在elf中的位置不太一样，这里使用多种写法，使得后面的查找替换都能够覆盖到。具体可以```readelf -r libtest.so```查看细节。
-```
-typedef int (*PutsFunc)(const char *s);
-
-PutsFunc f = &puts;
-
-extern "C" bool libtest(int n) {
-    char buff[128] = {0};
-    snprintf(buff, sizeof(buff), "libtest %d", n);
-    if (n % 3 == 0) {
-        puts(buff);
-    } else if (n % 3 == 1) {
-        f(buff);
-    } else {
-        PutsFunc ff = &puts;
-        ff(buff);
-    }
-    return false;
-}
-```
-这时候，test是没有加载libtestnew.so的，后面会用hookso来注入，libtestnew.cpp的代码如下
-```
-extern "C" bool libtestnew(int n) {
-    char buff[128] = {0};
-    snprintf(buff, sizeof(buff), "libtestnew %d", n);
-    puts(buff);
-    return false;
-}
-
-extern "C" bool putsnew(const char *str) {
-    char buff[128] = {0};
-    snprintf(buff, sizeof(buff), "putsnew %s", str);
-    puts(buff);
-    return false;
-}
-```
-libtestnew.cpp定义了两个函数，一个用来替换libtest.so的puts函数，一个用来替换libtest.so的libtest函数
-
-现在我们开始编译并运行它
-```
-# cd test
-# ./build.sh
-# ./test
-libtest 1
-libtest 2
-...
-libtest 10
-```
-程序开始运行，可以看到，不停的打印到输出，假设test的pid是11234
-
-* 示例1：让test在屏幕上打印一句话
-```
-# ./hookso syscall 11234 1 i=1 s="haha" i=4
-4
-```
-注意这里的输出4，表示是系统调用的返回值。然后观察test的输出，可以看到haha输出
-```
-libtest 12699
-libtest 12700
-hahalibtest 12701
-libtest 12702
-libtest 12703
-```
-这里的几个参数说明：1是系统调用的号码，1表示的是write，i=1意思是一个int类型值为1的参数，s="haha"则为字符串内容为haha
-
-所以这里等价于C语言调用了write(1, "haha", 4)，也就是在标准输出打印一句话
-
-* 示例2：让test调用libtest.so的libtest函数
-```
-# ./hookso call 11234 libtest.so libtest i=1234
-0
-```
-这里的参数和返回值，和示例1 syscall同理。然后观察test的输出，可以看到输出
-```
-libtest 12713
-libtest 12714
-libtest 12715
-libtest 1234
-libtest 12716
-libtest 12717
-```
-libtest 1234则为我们插入的一次调用输出结果
-
-* 示例3：让test加载libtestnew.so
-```
-# ./hookso dlopen 11234 ./test/libtestnew.so 
-13388992
-```
-注意这里的输出13388992，表示是dlopen的handle，这个handle后面卸载so会用到。然后查看系统/proc/11234/maps
-```
-# cat /proc/11234/maps 
-00400000-00401000 r-xp 00000000 fc:01 678978                             /home/project/hookso/test/test
-00600000-00601000 r--p 00000000 fc:01 678978                             /home/project/hookso/test/test
-00601000-00602000 rw-p 00001000 fc:01 678978                             /home/project/hookso/test/test
-01044000-01076000 rw-p 00000000 00:00 0                                  [heap]
-7fb351aa9000-7fb351aaa000 r-xp 00000000 fc:01 678977                     /home/project/hookso/test/libtestnew.so
-7fb351aaa000-7fb351ca9000 ---p 00001000 fc:01 678977                     /home/project/hookso/test/libtestnew.so
-7fb351ca9000-7fb351caa000 r--p 00000000 fc:01 678977                     /home/project/hookso/test/libtestnew.so
-7fb351caa000-7fb351cab000 rw-p 00001000 fc:01 678977                     /home/project/hookso/test/libtestnew.so
-```
-可以看到libtestnew.so已经成功加载
-
-* 示例4：让test卸载libtestnew.so
-```
-# ./hookso dlclose 11234 13388992
-13388992
-```
-这个13388992是示例3 dlopen返回的handle值(多次dlopen的值是一样，并且dlopen多次就得dlclose多次才能真正卸载掉)。然后查看系统/proc/11234/maps
-```
-# cat /proc/16992/maps 
-00400000-00401000 r-xp 00000000 fc:01 678978                             /home/project/hookso/test/test
-00600000-00601000 r--p 00000000 fc:01 678978                             /home/project/hookso/test/test
-00601000-00602000 rw-p 00001000 fc:01 678978                             /home/project/hookso/test/test
-01044000-01076000 rw-p 00000000 00:00 0                                  [heap]
-7fb3525ab000-7fb352765000 r-xp 00000000 fc:01 25054                      /usr/lib64/libc-2.17.so
-7fb352765000-7fb352964000 ---p 001ba000 fc:01 25054                      /usr/lib64/libc-2.17.so
-7fb352964000-7fb352968000 r--p 001b9000 fc:01 25054                      /usr/lib64/libc-2.17.so
-7fb352968000-7fb35296a000 rw-p 001bd000 fc:01 25054                      /usr/lib64/libc-2.17.so
-```
-可以看到已经没用libtestnew.so了
-
-* 示例5：让test加载libtestnew.so，执行libtestnew，然后卸载libtestnew.so
-```
-# ./hookso dlcall 11234 ./test/libtestnew.so libtestnew i=1234
-0
-```
-同理，这里的输出0为函数返回值。然后观察test的输出，可以看到libtestnew.so的libtestnew函数输出
-```
-libtest 151
-libtest 152
-libtest 153
-libtestnew 1234
-libtest 154
-libtest 155
-```
-libtestnew 1234就是libtestnew.so的函数libtestnew输出，dlcall相当于执行了前面的dlopen、call、dlclose三步操作
-
-* 示例6：让test加载libtestnew.so，并把libtest.so的puts函数调用，修改为调用libtestnew.so的putsnew
-```
-# ./hookso replace 11234 libtest.so puts ./test/libtestnew.so putsnew
-13388992    140573454638880
-```
-注意这里的输出结果13388992表示handle，140573454638880表示替换之前的旧值，后面我们复原会用到。然后观察test的输出，可以看到已经调用到了libtestnew.so的putsnew方法
-```
-libtest 3313
-libtest 3314
-libtest 3315
-libtest 3316
-libtest 3317
-putsnew libtest 3318
-putsnew libtest 3319
-putsnew libtest 3320
-```
-现在开始，libtest.so内部调用puts函数，就变成了调用libtestnew.so的putsnew函数了，libtest.so之外调用puts函数，还是以前的没有变
-
-* 示例7：让test的libtest.so的puts函数，恢复到之前，这里的140573454638880就是之前示例6 replace输出的backup旧值
-```
-# ./hookso setfunc 11234 libtest.so puts 140573454638880
-140573442652001
-```
-注意这里的setfunc也会输出旧值140573442652001，方便下次再还原。然后观察test的输出，可以看到又重新回到了puts方法
-```
-putsnew libtest 44
-putsnew libtest 45
-putsnew libtest 46
-libtest 47
-libtest 48
-libtest 49
-```
-注意这时候libnewtest.so仍然在内存中，如果不需要可以用dlclose卸载它，这里不再赘述
-
-* 示例8：让test加载libtestnew.so，并把libtest.so的libtest函数，跳转到libtestnew的libtestnew，这个和示例6的区别是libtest是libtest.so内部实现的函数，puts是libtest.so调用的外部函数
-```
-# ./hookso replace 2936 libtest.so libtest ./test/libtestnew.so libtestnew
-13388992    10442863786053945429
-```
-这里的输出和示例6同理。然后观察test的输出，可以看到调用了libtestnew.so的libtestnew函数
-```
-libtest 31714
-libtest 31715
-libtest 31716
-libtest 31717
-libtest 31718
-libtestnew 31719
-libtestnew 31720
-libtestnew 31721
-libtestnew 31722
-libtestnew 31723
-```
-现在整个进程所有调用libtest的地方，都跳转到了libtestnew函数
-
-* 示例9：让test的libtest.so的libtest函数，恢复到之前，这里的10442863786053945429就是之前示例8 replace输出的替换旧值
-```
-# ./hookso setfunc 11234 libtest.so libtest 10442863786053945429
-1092601523177
-```
-然后观察test的输出，可以看到又回到了libtest.so的libtest函数
-```
-libtestnew 26
-libtestnew 27
-libtestnew 28
-libtestnew 29
-libtest 30
-libtest 31
-libtest 32
+```mermaid
+flowchart TB
+  A[PTRACE_ATTACH] --> B[Pick an RX trampoline<br/>prefer vdso+8]
+  B --> C[mmap a call stack]
+  C --> D{What next?}
+  D -->|syscall / call / dlopen| E[Write stub, set regs, CONT]
+  D -->|find / replace| F[Parse maps and ELF]
+  E --> G[On SIGTRAP, restore]
+  F --> H[Patch GOT or write jmp]
+  G --> I[PTRACE_DETACH]
+  H --> I
 ```
 
-* 示例10：查找test的libtest.so的libtest函数地址
-```
-# ./hookso find 11234 libtest.so libtest
-0x7fd9cfb91668  140573469644392
-```
-0x7fd9cfb91668即为地址，140573469644392是地址转成了uint64_t的值
+### 1. Attach
 
-* 示例11：查看libtest.so的libtest的传参值
-```
-# ./hookso arg 11234 libtest.so libtest 1
-35
-# ./hookso arg 11234 libtest.so libtest 1
-36
-```
-最后一个参数1表示第1个参数，因为test是在循环+1，所以每次传入libtest函数的参数都在变化
+`PTRACE_ATTACH` then `waitpid` leaves the target stopped at an instruction boundary. Memory and register access happen in that state. If setup fails after attach, hookso `DETACH`s so the target is not left in SIGSTOP.
 
-* 示例12：当执行libtest.so的libtest时，执行syscall，在屏幕上输出haha
-```
-# ./hookso trigger 11234 libtest.so libtest syscall 1 i=1 s="haha" i=4
-4
-```
-然后观察test的输出，可以看到调用的输出
-```
-libtest 521
-libtest 522
-hahalibtest 523
-libtest 524
-```
+### 2. Trampoline: 8 bytes of code in the target
 
-* 示例13：当执行libtest.so的libtest时，执行call，用相同的参数调用一次libtest函数
-```
-# ./hookso trigger 11234 libtest.so libtest call libtest.so libtest @1
-0
-```
-然后观察test的输出，可以看到输出了两次818
-```
-libtest 816
-libtest 817
-libtest 818
-libtest 818
-libtest 819
-libtest 820
+To make the **target** execute `mmap`, `dlopen`, or an arbitrary function, hookso needs executable memory in that process for a short stub.
+
+| Purpose | Bytes | Meaning |
+|---------|--------|---------|
+| Remote syscall | `0f 05 cc` | `syscall; int3` |
+| Remote call | `ff d0 cc` | `callq *%rax; int3` |
+
+`int3` returns control to hookso (`SIGTRAP`). The original 8 bytes and registers are then restored.
+
+Trampoline location, in order:
+
+1. **`[vdso] + 8`**: vdso is a small ELF the kernel maps, almost always `r-xp`. Offset 8 is `e_ident[8..15]`, normally padding.
+2. An **executable** libc mapping that includes the ELF header, plus 8 (older distros often map the whole first segment `r-xp`).
+3. Start of libc `.text` (overwrites real instructions; last resort).
+
+```text
+e_ident:
+  +0  7f E L F
+  +4  class / data / version / osabi
+  +8  padding      ← stub goes here
 ```
 
-* 示例14：当执行libtest.so的libtest时，执行dlcall，用相同的参数调用一次libtestnew.so的libtestnew函数
-```
-# ./hookso trigger 11234 libtest.so libtest dlcall ./test/libtestnew.so libtestnew @1
-0
-```
-然后观察test的输出，可以看到输出了libtestnew的结果
-```
-libtest 972
-libtest 973
-libtestnew 974
-libtest 974
-libtest 975
+`libc_base + 8` is not always valid. Current glibc maps the ELF header as **`r--p`**. Executing there SIGSEGVs, which is why vdso is preferred.
+
+Remote syscalls use the Linux convention: `rax` = number, `rdi rsi rdx r10 r8 r9` = args. Remote calls use SysV: `rdi rsi rdx rcx r8 r9`, plus an `mmap`'d stack with 16-byte-aligned `rsp`. String arguments are copied into a page allocated in the target, then passed as a pointer.
+
+### 3. Reading and writing memory
+
+Tried in order:
+
+1. `process_vm_readv` / `process_vm_writev`
+2. `pread` / `pwrite` on `/proc/<pid>/mem`
+3. `PTRACE_PEEKTEXT` / `POKETEXT`
+
+Ptrace poke can write RX pages, so the vdso / `.text` stub can be installed. Short reads or writes are treated as failure.
+
+### 4. Finding a function in a `.so`
+
+```mermaid
+flowchart LR
+  M["/proc/pid/maps<br/>load base"] --> E[ELF]
+  E --> S[.dynsym / .dynstr]
+  S --> T{Defined here?}
+  T -->|yes, in .text| A[base + st_value]
+  T -->|imported| G[.rela.plt / .rela.dyn<br/>GOT slot]
 ```
 
-* 示例15：当执行libtest.so的libtest时，执行dlopen，注入libtestnew.so
-```
-# ./hookso trigger 11234 libtest.so libtest dlopen ./test/libtestnew.so  
-15367360
+- A basename such as `libtest.so` is parsed from **target memory**. If section headers are not mapped, that fails with I/O error.
+- A **filesystem path** parses the file, then adds the load base from maps. Use this for large libraries such as `libstdc++`.
+- libc may appear as `libc-2.17.so` or `libc.so.6`. Injection tries `__libc_dlopen_mode` first, then public `dlopen` (the private symbol is gone in glibc 2.34+).
+
+Internal vs imported symbols later pick different patch strategies.
+
+### 5. Replace: GOT, near jump, far jump
+
+hookso `dlopen`s the new `.so`, then patches the old site:
+
+```mermaid
+flowchart TB
+  F[Old function] --> P{Kind}
+  P -->|imported, GOT| G[Point GOT at the new function]
+  P -->|local .text| D{Within ±2GB?}
+  D -->|yes| J["jmp rel32<br/>e9 xx xx xx xx"]
+  D -->|no| FAR["Store pointer on a low page<br/>jmpq *disp32(%rip)"]
 ```
 
-* 示例16：当执行libtest.so的libtest时，执行dlclose，卸载libtestnew.so
-```
-# ./hookso trigger 11234 libtest.so libtest dlclose 15367360
-15367360
-```
+- **PLT/GOT**: only that `.so`'s imports change. `puts` inside `libtest.so` becomes `putsnew`; other modules keep the original `puts`.
+- **Near jump**: `jmp rel32` is a signed 32-bit displacement (±2GB), not 4GB.
+- **Far jump**: a non-PIE binary at `0x40...` cannot `rel32` to a `.so` at `0x7f...`. hookso allocates a page in the low 32-bit range, stores the new pointer, and writes `ff 25 disp32` (`jmpq *offset(%rip)`).
 
-* 示例17：查看某个地址的函数传参值，例如通过find得到的地址，或者其他途径得到的地址
-```
-# ./hookso argp 11234 140573469644392 1
-35
-# ./hookso argp 11234 140573469644392 1
-36
-```
-最后一个参数1表示第1个参数，因为test是在循环+1，所以每次传入libtest函数的参数都在变化
+`setfunc` / `setfuncp` write the saved 8 bytes or GOT value back.
 
-* 示例18：当执行某个地址的函数时，执行syscall，在屏幕上输出haha
-```
-# ./hookso triggerp 11234 140573469644392 syscall 1 i=1 s="haha" i=4
-4
-```
-其他triggerp的参数，与trigger相同，不再赘述
+### 6. Catching one call: `arg` / `trigger`
 
-* 示例19：通过其他方式（如gdb）获得libtest.so的libtest函数地址，修改其跳转到libtestnew.so的libtestnew
-```
-# gdb -p 11234 -ex "p (long)libtest" --batch | grep "$1 = " | awk '{print $3}'
-4196064
-# ./hookso replacep 11234 4196064 ./test/libtestnew.so libtestnew
-23030976        6295592 140220482557656
-```
-这里的输出分别代表handle、地址、地址的旧值，然后观察test的输出，可以看到输出了libtestnew的结果
-```
-libtest 8
-libtest 9
-libtest 10
-libtestnew 11
-libtestnew 12
-libtestnew 13
-libtestnew 14
-```
-* 示例20：使用replacep输出的旧值，还原replacep的修改
-```
-# ./hookso setfuncp 11234 6295592 140220482557656
-139906556569240
-```
-然后观察test的输出，可以看到输出已经还原
-```
-libtestnew 32
-libtestnew 33
-libtestnew 34
-libtestnew 35
-libtest 36
-libtest 37
-libtest 38
-```
-* 示例21：通过其他方式（如gdb）获得test的mysleep函数地址，修改其跳转到libtestnew.so的mysleepnew
-```
-# gdb -p 11234 -ex "p (long)mysleep" --batch | grep "$1 = " | awk '{print $3}'
-4196356
-# ./hookso replacep 11234 4196356 ./test/libtestnew.so mysleepnew
-23030976        4196356 1923701360725
-```
-这里类似示例19，不过这里是把test的原生低地址函数mysleep跳转到so中的高地址函数mysleepnew，内部实现机制不太相同。观察test的输出结果
-```
-libtest 28
-libtest 29
-libtest 30
-libtest 31
-mysleepnew
-libtest 32
-mysleepnew
-libtest 33
-mysleepnew
-libtest 34
-```
-可以看到mysleepnew已经生效
+An `int3` is written at the entry, then `CONT` waits for the next hit:
 
-# 用法
-```
-hookso: type pid params
+- RIP is decremented by 1 and the original bytes are restored
+- Arguments are read as `rdi, rsi, rdx, rcx, r8, r9` (the 4th is `rcx`, not syscall `r10`)
+- `trigger` can pass them on with `@1` meaning “first argument of the call just caught”
 
-eg:
+If the target is executing the bytes being patched, the patch is refused so those instructions are not torn.
 
-do syscall: 
-# ./hookso syscall pid syscall-number i=int-param1 s="string-param2" 
+## Quick start
 
-call .so function: 
-# ./hookso call pid target-so target-func i=int-param1 s="string-param2" 
+```bash
+./build.sh
+cd test && ./build.sh && ./test &
+PID=$!
 
-dlopen .so: 
-# ./hookso dlopen pid target-so-path 
-
-dlclose .so: 
-# ./hookso dlclose pid handle 
-
-open .so and call function and close: 
-# ./hookso dlcall pid target-so-path target-func i=int-param1 s="string-param2" 
-
-replace src.so old-function to target.so new-function: 
-# ./hookso replace pid src-so src-func target-so-path target-func 
-
-replace target-function-addr to target.so new-function: 
-# ./hookso replacep pid func-addr target-so-path target-func 
-
-set target.so target-function new value : 
-# ./hookso setfunc pid target-so target-func value 
-
-set target-function-addr new value : 
-# ./hookso setfuncp pid func-addr value 
-
-find target.so target-function : 
-# ./hookso find pid target-so target-func 
-
-get target.so target-function call argument: 
-# ./hookso arg pid target-so target-func arg-index 
-
-get target-function-addr call argument: 
-# ./hookso argp pid func-addr arg-index 
-
-before call target.so target-function, do syscall/call/dlcall/dlopen/dlclose with params: 
-# ./hookso trigger pid target-so target-func syscall syscall-number @1 i=int-param2 s="string-param3" 
-# ./hookso trigger pid target-so target-func call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
-# ./hookso trigger pid target-so target-func dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
-# ./hookso trigger pid target-so target-func dlopen target-so-path
-# ./hookso trigger pid target-so target-func dlclose handle
-
-before call target-function-addr, do syscall/call/dlcall/dlopen/dlclose with params: 
-# ./hookso triggerp pid func-addr syscall syscall-number @1 i=int-param2 s="string-param3" 
-# ./hookso triggerp pid func-addr call trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
-# ./hookso triggerp pid func-addr dlcall trigger-target-so trigger-target-func @1 i=int-param2 s="string-param3" 
-# ./hookso triggerp pid func-addr dlopen target-so-path
-# ./hookso triggerp pid func-addr dlclose handle
+../hookso find $PID ./libtest.so libtest
+../hookso syscall $PID 1 i=1 s="haha" i=4
 ```
 
-# QA
-##### 为什么就一个3k行+的main.cpp?
-因为东西简单，减少无谓的封装，增加可读性
-##### 这东西实际有什么作用？
-如同瑞士军刀一样，用处很多。可以用来热更新，或者监控某些函数行为，或者开启调试
-##### 函数调用有什么限制？
-syscall、call、dlcall只支持最大6个参数的函数调用，并且参数只能支持整形、字符  
-replace不受限制，但是必须确保新的函数和旧函数，参数一致，不然会core掉
-##### 有些so的函数会报错？
-某些so太大无法被全部load进内存，导致无法解析，运行失败，如
-```
-# ./hookso find 11234 libstdc++.so.6.0.28 __dynamic_cast                 
-[ERROR][2020.4.28,14:26:55,161]main.cpp:172,remote_process_read: remote_process_read fail 0x7fc375714760 5 Input/output error
-```
-把so参数修改成文件路径，这样就会从文件读取so信息
-```
-# ./hookso find 11234 /usr/local/lib64/libstdc++.so.6.0.28 __dynamic_cast
-0x7fc37475cea0   140477449227936
-```
-可以看到，find命令已成功执行，对于其他的命令如call、dlopen、replace同理
+Full command list and walkthrough: **[Usage](./README_USAGE.md)**.
 
-# 应用
-[Lua 代码覆盖率工具 cLua](https://github.com/esrrhs/cLua)
+```bash
+./hookso syscall  <pid> <nr> i=1 s="str"
+./hookso call     <pid> so func i=1
+./hookso dlopen   <pid> ./new.so
+./hookso replace  <pid> old.so old new.so new
+./hookso arg      <pid> so func 1
+```
 
-[Lua 性能分析工具 pLua](https://github.com/esrrhs/pLua)
+Tests: `bash test/run_tests.sh` (needs ptrace; CI sets `yama.ptrace_scope=0`).
 
-[Lua 调试工具 dLua](https://github.com/esrrhs/dlua)
+## Limits
 
-[Lua 监控工具 wLua](https://github.com/esrrhs/wLua)
+- x86-64 only; syscall / call / dlcall take at most 6 integer or string arguments
+- `replace` requires matching signatures or the target will crash
+- Only the given pid's thread is attached; other threads can still race a patch
+- If a `.so` is not fully mapped, pass a **file path** instead of the soname
+
+## Who is using it
+
+[cLua](https://github.com/esrrhs/cLua) · [pLua](https://github.com/esrrhs/pLua) · [dLua](https://github.com/esrrhs/dlua) · [wLua](https://github.com/esrrhs/wLua)
