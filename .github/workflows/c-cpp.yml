@@ -12,9 +12,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: build
       run: |
         ./build.sh
         cd test
         ./build.sh
+    - name: allow ptrace
+      run: sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+    - name: test
+      run: bash test/run_tests.sh
