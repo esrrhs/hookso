@@ -30,6 +30,8 @@
 #include <unistd.h>
 #include <linux/limits.h>
 #include <inttypes.h>
+#include <cctype>
+#include <stdexcept>
 #include <elf.h>
 #include <sys/uio.h>
 #include <sys/ptrace.h>
@@ -51,7 +53,17 @@
 #else
 #define LOG(...)
 #endif
-#define ERR(...) log(stderr, "[ERROR]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__)
+int g_err_quiet = 0;
+#define ERR(...) do { if (!g_err_quiet) log(stderr, "[ERROR]", __FILENAME__, __FUNCTION__, __LINE__, __VA_ARGS__); } while (0)
+
+static bool linux_syscall_failed(uint64_t retval) {
+    return retval >= (uint64_t) -4095ULL;
+}
+
+static bool rel32_out_of_range(uint64_t from_next_insn, uint64_t to) {
+    int64_t diff = (int64_t) to - (int64_t) from_next_insn;
+    return diff > (int64_t) INT32_MAX || diff < (int64_t) INT32_MIN;
+}
 
 void log(FILE *fd, const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
     time_t clock1;
@@ -78,7 +90,6 @@ void log(FILE *fd, const char *header, const char *file, const char *func, int p
 int remote_process_vm_readv(int remote_pid, void *address, void *buffer, size_t len) {
     struct iovec local[1] = {};
     struct iovec remote[1] = {};
-    int errsv = 0;
     ssize_t nread = 0;
 
     local[0].iov_len = len;
@@ -89,9 +100,11 @@ int remote_process_vm_readv(int remote_pid, void *address, void *buffer, size_t 
 
     nread = process_vm_readv(remote_pid, local, 1, remote, 1, 0);
 
-    if (nread != (int) local[0].iov_len) {
-        errsv = errno;
-        return errsv;
+    if (nread != (ssize_t) len) {
+        if (nread < 0) {
+            return errno;
+        }
+        return EIO;
     }
 
     return 0;
@@ -102,20 +115,24 @@ int remote_process_ptrace_read(int remote_pid, void *address, void *buffer, size
 
     char file[PATH_MAX];
     sprintf(file, "/proc/%d/mem", remote_pid);
-    int fd = open(file, O_RDWR);
+    int fd = open(file, O_RDONLY);
     if (fd < 0) {
         errsv = errno;
         return errsv;
     }
 
-    int ret = pread(fd, buffer, len, (off_t) address);
-    if (ret < 0) {
+    ssize_t nread = pread(fd, buffer, len, (off_t) address);
+    if (nread < 0) {
         errsv = errno;
         close(fd);
         return errsv;
     }
+    if ((size_t) nread != len) {
+        close(fd);
+        return EIO;
+    }
 
-    ret = close(fd);
+    int ret = close(fd);
     if (ret < 0) {
         errsv = errno;
         return errsv;
@@ -177,7 +194,6 @@ int remote_process_read(int remote_pid, void *address, void *buffer, size_t len,
 int remote_process_vm_writev(int remote_pid, void *address, void *buffer, size_t len) {
     struct iovec local[1] = {};
     struct iovec remote[1] = {};
-    int errsv = 0;
     ssize_t nread = 0;
 
     local[0].iov_len = len;
@@ -188,9 +204,11 @@ int remote_process_vm_writev(int remote_pid, void *address, void *buffer, size_t
 
     nread = process_vm_writev(remote_pid, local, 1, remote, 1, 0);
 
-    if (nread != (int) local[0].iov_len) {
-        errsv = errno;
-        return errsv;
+    if (nread != (ssize_t) len) {
+        if (nread < 0) {
+            return errno;
+        }
+        return EIO;
     }
 
     return 0;
@@ -207,14 +225,18 @@ int remote_process_ptrace_write(int remote_pid, void *address, void *buffer, siz
         return errsv;
     }
 
-    int ret = pwrite(fd, buffer, len, (off_t) address);
-    if (ret < 0) {
+    ssize_t nwritten = pwrite(fd, buffer, len, (off_t) address);
+    if (nwritten < 0) {
         errsv = errno;
         close(fd);
         return errsv;
     }
+    if ((size_t) nwritten != len) {
+        close(fd);
+        return EIO;
+    }
 
-    ret = close(fd);
+    int ret = close(fd);
     if (ret < 0) {
         errsv = errno;
         return errsv;
@@ -453,6 +475,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
     }
 
     Elf64_Shdr &pltsection = setions[pltindex];
+    (void) pltsection;
     LOG("plt index %d", pltindex);
     LOG("plt section offset %ld", pltsection.sh_offset);
     LOG("plt section size %ld", pltsection.sh_size);
@@ -780,6 +803,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
     }
 
     Elf64_Shdr &pltsection = setions[pltindex];
+    (void) pltsection;
     LOG("plt index %d", pltindex);
     LOG("plt section offset %ld", pltsection.sh_offset);
     LOG("plt section size %ld", pltsection.sh_size);
@@ -927,9 +951,10 @@ int find_so_func_addr(int pid, const std::string &so,
     int sofd = open(so.c_str(), O_RDONLY);
     if (sofd == -1) {
         return find_so_func_addr_by_mem(pid, so, funcname, funcaddr_plt, funcaddr);
-    } else {
-        return find_so_func_addr_by_file(pid, so, funcname, funcaddr_plt, funcaddr, sofd);
     }
+    int ret = find_so_func_addr_by_file(pid, so, funcname, funcaddr_plt, funcaddr, sofd);
+    close(sofd);
+    return ret;
 }
 
 bool ends_with(const std::string &str, const std::string &suffix) {
@@ -940,7 +965,28 @@ bool starts_with(const std::string &str, const std::string &prefix) {
     return str.size() >= prefix.size() && 0 == str.compare(0, prefix.size(), prefix);
 }
 
-int find_libc_name(int pid, std::string &name, void *&psostart) {
+bool is_libc_soname(const std::string &targetso) {
+    if (targetso == "libc.so.6" || targetso == "libc.so") {
+        return true;
+    }
+    if (starts_with(targetso, "libc.so.")) {
+        return true;
+    }
+    return starts_with(targetso, "libc-") && ends_with(targetso, ".so");
+}
+
+bool is_libdl_soname(const std::string &targetso) {
+    if (targetso == "libdl.so.2" || targetso == "libdl.so") {
+        return true;
+    }
+    if (starts_with(targetso, "libdl.so.")) {
+        return true;
+    }
+    return starts_with(targetso, "libdl-") && ends_with(targetso, ".so");
+}
+
+int find_mapped_so(int pid, bool (*match)(const std::string &), const char *what,
+                   std::string &name, void *&psostart) {
 
     char maps_path[PATH_MAX];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -985,10 +1031,10 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
         }
         std::string targetso = path.substr(pos + 1);
         targetso.erase(std::find_if(targetso.rbegin(), targetso.rend(), [](int ch) {
-            return !std::isspace(ch);
+            return !std::isspace((unsigned char) ch);
         }).base(), targetso.end());
 
-        if (starts_with(targetso, "libc-") && ends_with(targetso, ".so")) {
+        if (match(targetso)) {
             name = targetso;
             sobeginstr = tmp[0];
             pos = sobeginstr.find_last_of("-");
@@ -1005,7 +1051,7 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
     fclose(fd);
 
     if (name.empty()) {
-        ERR("not find libc name in /proc/%d/maps", pid);
+        ERR("not find %s name in /proc/%d/maps", what, pid);
         return -1;
     }
 
@@ -1013,6 +1059,14 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
     psostart = (void *) sobeginvalue;
 
     return 0;
+}
+
+int find_libc_name(int pid, std::string &name, void *&psostart) {
+    return find_mapped_so(pid, is_libc_soname, "libc", name, psostart);
+}
+
+int find_libdl_name(int pid, std::string &name, void *&psostart) {
+    return find_mapped_so(pid, is_libdl_soname, "libdl", name, psostart);
 }
 
 int get_mem_mapping(int pid, std::vector<std::pair<uint64_t, uint64_t>> &mapping) {
@@ -1113,21 +1167,24 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
         return -1;
     }
 
+    int errsv = 0;
+    int status = 0;
+
     ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        return -1;
+        errsv = -1;
     }
 
-    ret = ptrace(PTRACE_CONT, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_CONT fail", pid);
-        return -1;
+    if (!errsv) {
+        ret = ptrace(PTRACE_CONT, pid, 0, 0);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_CONT fail", pid);
+            errsv = -1;
+        }
     }
 
-    int errsv = 0;
-    int status = 0;
-    while (1) {
+    while (!errsv) {
         ret = waitpid(pid, &status, 0);
         if (ret == -1) {
             if (errno == EINTR) {
@@ -1146,7 +1203,8 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
-                    return -1;
+                    errsv = -1;
+                    break;
                 }
                 continue;
             } else {
@@ -1173,16 +1231,19 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
         int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
         if (ret < 0) {
             ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            return -1;
+            errsv = -1;
+        } else {
+            retval = regs.rax;
         }
-        retval = regs.rax;
-    } else {
+    }
+    if (errsv) {
         retval = -1;
     }
 
     ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
         return -1;
     }
 
@@ -1191,7 +1252,7 @@ int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, ui
         return -1;
     }
 
-    return 0;
+    return errsv ? -1 : 0;
 }
 
 int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0,
@@ -1229,21 +1290,24 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
         return -1;
     }
 
+    int errsv = 0;
+    int status = 0;
+
     ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        return -1;
+        errsv = -1;
     }
 
-    ret = ptrace(PTRACE_CONT, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_CONT fail", pid);
-        return -1;
+    if (!errsv) {
+        ret = ptrace(PTRACE_CONT, pid, 0, 0);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_CONT fail", pid);
+            errsv = -1;
+        }
     }
 
-    int errsv = 0;
-    int status = 0;
-    while (1) {
+    while (!errsv) {
         ret = waitpid(pid, &status, 0);
         if (ret == -1) {
             if (errno == EINTR) {
@@ -1262,7 +1326,8 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
-                    return -1;
+                    errsv = -1;
+                    break;
                 }
                 continue;
             } else {
@@ -1289,16 +1354,19 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
         int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
         if (ret < 0) {
             ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            return -1;
+            errsv = -1;
+        } else {
+            retval = regs.rax;
         }
-        retval = regs.rax;
-    } else {
+    }
+    if (errsv) {
         retval = -1;
     }
 
     ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_SETREGS fail", pid);
+        remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
         return -1;
     }
 
@@ -1307,7 +1375,7 @@ int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0,
         return -1;
     }
 
-    return 0;
+    return errsv ? -1 : 0;
 }
 
 #pragma pack(1)
@@ -1338,7 +1406,7 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
 
     int pagesize = sysconf(_SC_PAGESIZE);
 
-    if (sizeof(GlobalMemHead) + sizeof(GlobalMemBody) + len > pagesize) {
+    if (sizeof(GlobalMemHead) + sizeof(GlobalMemBody) + (size_t) len > (size_t) pagesize) {
         ERR("alloc_global_mem fail len %d too big, pagesize is %d", len, pagesize);
         return -1;
     }
@@ -1359,7 +1427,7 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
             GlobalMemHead head;
             ret = remote_process_read(pid, (void *) mapping_start, &head, sizeof(head));
             if (ret != 0) {
-                return -1;
+                continue;
             }
 
             if (head.magic != GLOBAL_MEM_HEAD_MAGIC ||
@@ -1404,7 +1472,7 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
             GlobalMemHead head;
             ret = remote_process_read(pid, (void *) mapping_start, &head, sizeof(head));
             if (ret != 0) {
-                return -1;
+                continue;
             }
 
             if (head.magic != GLOBAL_MEM_HEAD_MAGIC ||
@@ -1464,16 +1532,17 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
         if (mapping[i].first >= 0xFFFFFFFF || mapping[i].second >= 0xFFFFFFFF) {
             continue;
         }
-
+        if (mapping[i].second <= find) {
+            continue;
+        }
         if (find >= mapping[i].first && find < mapping[i].second) {
             find = mapping[i].second;
             continue;
         }
-
         break;
     }
 
-    if (find == (uint64_t) 0x00400000) {
+    if (find == 0 || find >= 0xFFFFFFFFULL - (uint64_t) pagesize) {
         ERR("alloc_global_mem fail can no find page");
         return -1;
     }
@@ -1486,8 +1555,21 @@ int alloc_global_mem(int pid, const std::string &namestr, uint64_t key, int len,
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t) (-1)) {
-        return -1;
+    if (linux_syscall_failed(retval) || retval >= 0xFFFFFFFFULL) {
+        if (!linux_syscall_failed(retval) && retval != 0) {
+            uint64_t ignored = 0;
+            syscall_so(pid, ignored, syscall_sys_munmap, retval, pagesize);
+        }
+        retval = 0;
+        ret = syscall_so(pid, retval, syscall_sys_mmap, find, pagesize, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (ret != 0) {
+            return -1;
+        }
+        if (linux_syscall_failed(retval) || retval >= 0xFFFFFFFFULL) {
+            ERR("alloc_global_mem fail mmap low page");
+            return -1;
+        }
     }
 
     LOG("get_mem_mapping alloc new page return %p", (void *) retval);
@@ -1540,11 +1622,11 @@ int alloc_so_string_mem(int pid, const std::string &str, void *&targetaddr, int 
     LOG("start syscall sys_mmap %d %d", str.length(), len);
 
     uint64_t retval = 0;
-    int ret = syscall_so(pid, retval, syscall_sys_mmap, 0, len, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int ret = syscall_so(pid, retval, syscall_sys_mmap, 0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t) (-1)) {
+    if (linux_syscall_failed(retval)) {
         return -1;
     }
 
@@ -1572,7 +1654,7 @@ int free_so_string_mem(int pid, void *targetaddr, int targetlen, bool erasemap =
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t) (-1)) {
+    if (linux_syscall_failed(retval)) {
         return -1;
     }
 
@@ -1641,6 +1723,46 @@ int check_callstack_func_running(int pid, uint64_t modify_ip, int range, bool &r
     return 0;
 }
 
+int find_dl_func(int pid, const char *legacy_name, const char *public_name, void *&funcaddr) {
+    std::vector<void *> plt;
+    funcaddr = 0;
+
+    g_err_quiet = 1;
+    int ret = find_so_func_addr(pid, glibcname, legacy_name, plt, funcaddr);
+    if (ret == 0 && funcaddr != 0) {
+        g_err_quiet = 0;
+        LOG("libc %s func %s is %p", glibcname.c_str(), legacy_name, funcaddr);
+        return 0;
+    }
+
+    plt.clear();
+    funcaddr = 0;
+    ret = find_so_func_addr(pid, glibcname, public_name, plt, funcaddr);
+    g_err_quiet = 0;
+    if (ret == 0 && funcaddr != 0) {
+        LOG("libc %s func %s is %p", glibcname.c_str(), public_name, funcaddr);
+        return 0;
+    }
+
+    std::string libdlname;
+    void *libdlstart = 0;
+    g_err_quiet = 1;
+    ret = find_libdl_name(pid, libdlname, libdlstart);
+    g_err_quiet = 0;
+    if (ret == 0) {
+        plt.clear();
+        funcaddr = 0;
+        ret = find_so_func_addr(pid, libdlname, public_name, plt, funcaddr);
+        if (ret == 0 && funcaddr != 0) {
+            LOG("libdl %s func %s is %p", libdlname.c_str(), public_name, funcaddr);
+            return 0;
+        }
+    }
+
+    ERR("not find %s/%s in libc/libdl", legacy_name, public_name);
+    return -1;
+}
+
 int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
 
     char abspath[PATH_MAX];
@@ -1650,14 +1772,11 @@ int inject_so(int pid, const std::string &sopath, uint64_t &handle) {
     }
     LOG("start inject so %s", abspath);
 
-    std::vector<void *> libc_dlopen_mode_funcaddr_plt;
     void *libc_dlopen_mode_funcaddr = 0;
-    int ret = find_so_func_addr(pid, glibcname, "__libc_dlopen_mode", libc_dlopen_mode_funcaddr_plt,
-                                libc_dlopen_mode_funcaddr);
+    int ret = find_dl_func(pid, "__libc_dlopen_mode", "dlopen", libc_dlopen_mode_funcaddr);
     if (ret != 0) {
         return -1;
     }
-    LOG("libc %s func __libc_dlopen_mode is %p", glibcname.c_str(), libc_dlopen_mode_funcaddr);
 
     void *dlopen_straddr = 0;
     int dlopen_strlen = 0;
@@ -1751,12 +1870,35 @@ int usage() {
     return -1;
 }
 
+int parse_u64(const char *s, uint64_t &out) {
+    if (!s || !*s) {
+        ERR("parse number fail");
+        return -1;
+    }
+    try {
+        size_t idx = 0;
+        out = std::stoull(s, &idx, 0);
+        if (idx == 0) {
+            ERR("parse number fail %s", s);
+            return -1;
+        }
+        return 0;
+    } catch (...) {
+        ERR("parse number fail %s", s);
+        return -1;
+    }
+}
+
 int parse_arg_to_so(int pid, const std::string &arg, uint64_t &retval) {
+
+    if (arg.size() < 3 || arg[1] != '=') {
+        ERR("parse arg fail %s", arg.c_str());
+        return -1;
+    }
 
     // i=1234
     if (arg[0] == 'i') {
-        retval = std::stoull(arg.substr(2).c_str());
-        return 0;
+        return parse_u64(arg.c_str() + 2, retval);
     }
 
     // s=a b c d
@@ -1779,14 +1921,11 @@ int close_so(int pid, uint64_t handle) {
 
     LOG("start close so %lu", handle);
 
-    std::vector<void *> libc_dlclose_funcaddr_plt;
     void *libc_dlclose_funcaddr = 0;
-    int ret = find_so_func_addr(pid, glibcname, "__libc_dlclose", libc_dlclose_funcaddr_plt,
-                                libc_dlclose_funcaddr);
+    int ret = find_dl_func(pid, "__libc_dlclose", "dlclose", libc_dlclose_funcaddr);
     if (ret != 0) {
         return -1;
     }
-    LOG("libc %s func __libc_dlclose is %p", glibcname.c_str(), libc_dlclose_funcaddr);
 
     uint64_t retval = 0;
     ret = funccall_so(pid, retval, libc_dlclose_funcaddr, handle);
@@ -1828,7 +1967,10 @@ int program_dlclose(int argc, char **argv) {
     LOG("start remove so file %s", handlestr.c_str());
 
     int pid = atoi(pidstr.c_str());
-    uint64_t handle = std::stoull(handlestr.c_str());
+    uint64_t handle = 0;
+    if (parse_u64(handlestr.c_str(), handle) != 0) {
+        return -1;
+    }
 
     return program_dlclose_impl(pid, handle);
 }
@@ -1904,7 +2046,7 @@ int program_dlcall_impl(int pid, const std::string &targetso, const std::string 
         return -1;
     }
 
-    printf("%d\n", retval);
+    printf("%" PRIu64 "\n", retval);
 
     return 0;
 }
@@ -1925,6 +2067,10 @@ int program_dlcall(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
 
     uint64_t arg[6] = {0};
+    if (argc - 5 > 6) {
+        ERR("too many arguments, max 6");
+        return -1;
+    }
     for (int i = 5; i < argc; ++i) {
         std::string argstr = argv[i];
         int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
@@ -1962,7 +2108,7 @@ int program_call_impl(int pid, const std::string &targetso, const std::string &t
         return -1;
     }
 
-    printf("%d\n", retval);
+    printf("%" PRIu64 "\n", retval);
 
     return 0;
 }
@@ -1983,13 +2129,17 @@ int program_call(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
 
     uint64_t arg[6] = {0};
+    if (argc - 5 > 6) {
+        ERR("too many arguments, max 6");
+        return -1;
+    }
     for (int i = 5; i < argc; ++i) {
         std::string argstr = argv[i];
         int ret = parse_arg_to_so(pid, argstr, arg[i - 5]);
         if (ret != 0) {
             return -1;
         }
-        LOG("parse %d arg %d", i - 4, arg[i - 5]);
+        LOG("parse %d arg %lu", i - 4, arg[i - 5]);
     }
 
     int ret = program_call_impl(pid, targetso, targetfunc, arg);
@@ -2002,18 +2152,18 @@ int program_call(int argc, char **argv) {
 
 int program_syscall_impl(int pid, int syscallno, uint64_t arg[]) {
 
-    LOG("start syscall %d %p %d", syscallno);
+    LOG("start syscall %d", syscallno);
 
     uint64_t retval = 0;
     int ret = syscall_so(pid, retval, syscallno, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
     if (ret != 0) {
         return -1;
     }
-    if (retval == (uint64_t) (-1)) {
+    if (linux_syscall_failed(retval)) {
         return -1;
     }
 
-    printf("%d\n", retval);
+    printf("%" PRIu64 "\n", retval);
 
     return 0;
 }
@@ -2032,13 +2182,17 @@ int program_syscall(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
 
     uint64_t arg[6] = {0};
+    if (argc - 4 > 6) {
+        ERR("too many arguments, max 6");
+        return -1;
+    }
     for (int i = 4; i < argc; ++i) {
         std::string argstr = argv[i];
         int ret = parse_arg_to_so(pid, argstr, arg[i - 4]);
         if (ret != 0) {
             return -1;
         }
-        LOG("parse %d arg %d", i - 3, arg[i - 4]);
+        LOG("parse %d arg %lu", i - 3, arg[i - 4]);
     }
 
     int syscallno = atoi(syscallnostr.c_str());
@@ -2100,7 +2254,10 @@ int program_setfunc(int argc, char **argv) {
     LOG("valuestr=%s", valuestr.c_str());
 
     int pid = atoi(pidstr.c_str());
-    uint64_t value = std::stoull(valuestr.c_str());
+    uint64_t value = 0;
+    if (parse_u64(valuestr.c_str(), value) != 0) {
+        return -1;
+    }
 
     LOG("start parse so file %s %s", targetso.c_str(), targetfunc.c_str());
 
@@ -2160,8 +2317,11 @@ int program_setfuncp(int argc, char **argv) {
     LOG("valuestr=%s", valuestr.c_str());
 
     int pid = atoi(pidstr.c_str());
-    uint64_t funcaddr = std::stoull(targetaddr.c_str());
-    uint64_t value = std::stoull(valuestr.c_str());
+    uint64_t funcaddr = 0;
+    uint64_t value = 0;
+    if (parse_u64(targetaddr.c_str(), funcaddr) != 0 || parse_u64(valuestr.c_str(), value) != 0) {
+        return -1;
+    }
 
     void *old_funcaddr = (void *) funcaddr;
     LOG("old %p", old_funcaddr);
@@ -2246,7 +2406,7 @@ int program_replace(int argc, char **argv) {
             return -1;
         }
 
-        if (std::abs((int64_t) new_funcaddr - ((int64_t) old_funcaddr + 5)) > (int64_t) 0xFFFFFFFF) {
+        if (rel32_out_of_range((uint64_t) old_funcaddr + 5, (uint64_t) new_funcaddr)) {
             ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
             close_so(pid, handle);
             return -1;
@@ -2327,7 +2487,11 @@ int program_replacep(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    void *old_funcaddr = (void *) std::stoull(srcaddr.c_str());
+    uint64_t srcaddr_val = 0;
+    if (parse_u64(srcaddr.c_str(), srcaddr_val) != 0) {
+        return -1;
+    }
+    void *old_funcaddr = (void *) srcaddr_val;
 
     LOG("old %s=%p", srcaddr.c_str(), old_funcaddr);
 
@@ -2387,7 +2551,7 @@ int program_replacep(int argc, char **argv) {
             targetfunc.c_str(), new_funcaddr);
         printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
 
-    } else if (std::abs((int64_t) new_funcaddr - ((int64_t) old_funcaddr + 5)) > (int64_t) 0xFFFFFFFF) {
+    } else if (rel32_out_of_range((uint64_t) old_funcaddr + 5, (uint64_t) new_funcaddr)) {
 
         void *far_jmpq_addr_pointer = 0;
         int far_jmpq_addr_pointer_len = 0;
@@ -2399,6 +2563,12 @@ int program_replacep(int argc, char **argv) {
         }
 
         LOG("far jump addr pointer=%p", far_jmpq_addr_pointer);
+
+        if (rel32_out_of_range((uint64_t) old_funcaddr + 6, (uint64_t) far_jmpq_addr_pointer)) {
+            ERR("far jmp offset too far from %p to %p", old_funcaddr, far_jmpq_addr_pointer);
+            close_so(pid, handle);
+            return -1;
+        }
 
         int offset = (int) ((uint64_t) far_jmpq_addr_pointer - (uint64_t) old_funcaddr - 6);
         LOG("far jump offset=%d", offset);
@@ -2499,6 +2669,7 @@ void *grecoverfuncaddr;
 uint64_t grecovercode;
 
 void backup_function(int sig) {
+    (void) sig;
     if (grecoverpid > 0) {
         remote_process_write(grecoverpid, grecoverfuncaddr, &grecovercode, sizeof(grecovercode));
         grecoverpid = 0;
@@ -2553,8 +2724,6 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
     grecoverpid = pid;
     grecoverfuncaddr = old_funcaddr;
     grecovercode = backup;
-    signal(SIGKILL, backup_function);
-    signal(SIGSTOP, backup_function);
     signal(SIGTERM, backup_function);
     signal(SIGHUP, backup_function);
     signal(SIGINT, backup_function);
@@ -2563,15 +2732,16 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
 
     LOG("set code=%lu", newcode);
 
+    int errsv = 0;
+    int status = 0;
+
     ret = ptrace(PTRACE_CONT, pid, 0, 0);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_CONT fail", pid);
-        return -1;
+        errsv = -1;
     }
 
-    int errsv = 0;
-    int status = 0;
-    while (1) {
+    while (!errsv) {
         ret = waitpid(pid, &status, 0);
         if (ret == -1) {
             if (errno == EINTR) {
@@ -2590,7 +2760,8 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
                 ret = ptrace(PTRACE_CONT, pid, 0, 0);
                 if (ret < 0) {
                     ERR("ptrace %d PTRACE_CONT fail", pid);
-                    return -1;
+                    errsv = -1;
+                    break;
                 }
                 continue;
             } else {
@@ -2630,8 +2801,6 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
     grecoverpid = 0;
     grecoverfuncaddr = 0;
     grecovercode = 0;
-    signal(SIGKILL, SIG_DFL);
-    signal(SIGSTOP, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
     signal(SIGHUP, SIG_DFL);
     signal(SIGINT, SIG_DFL);
@@ -2656,7 +2825,7 @@ int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
     args[0] = regs.rdi;
     args[1] = regs.rsi;
     args[2] = regs.rdx;
-    args[3] = regs.r10;
+    args[3] = regs.rcx;
     args[4] = regs.r8;
     args[5] = regs.r9;
 
@@ -2694,7 +2863,11 @@ int program_argp(int argc, char **argv) {
     int pid = atoi(pidstr.c_str());
     int argindex = atoi(argindexstr.c_str());
 
-    void *old_funcaddr = (void *) std::stoull(targetaddr.c_str());
+    uint64_t targetaddr_val = 0;
+    if (parse_u64(targetaddr.c_str(), targetaddr_val) != 0) {
+        return -1;
+    }
+    void *old_funcaddr = (void *) targetaddr_val;
 
     uint64_t args[6] = {0};
     int ret = wait_funccall_addr(pid, old_funcaddr, args);
@@ -2749,7 +2922,7 @@ program_trigger_impl(int argc, char **argv, int pid, std::string calltype, int c
     std::string trigger_targetso;
     std::string trigger_targetfunc;
 
-    uint64_t trigger_targethandle;
+    uint64_t trigger_targethandle = 0;
 
     int argstart = 0;
 
@@ -2776,7 +2949,9 @@ program_trigger_impl(int argc, char **argv, int pid, std::string calltype, int c
         if (argc < calltypeindex + 2) {
             return usage();
         }
-        trigger_targethandle = std::stoull(argv[calltypeindex + 1]);
+        if (parse_u64(argv[calltypeindex + 1], trigger_targethandle) != 0) {
+            return -1;
+        }
         argstart = calltypeindex + 2;
     } else {
         ERR("calltype %s must be syscall/dlcall/call", calltype.c_str());
@@ -2784,6 +2959,10 @@ program_trigger_impl(int argc, char **argv, int pid, std::string calltype, int c
     }
 
     uint64_t arg[6] = {0};
+    if (argc - argstart > 6) {
+        ERR("too many arguments, max 6");
+        return -1;
+    }
     for (int i = argstart; i < argc; ++i) {
         std::string argstr = argv[i];
         if (argstr[0] == '@') {
@@ -2815,7 +2994,7 @@ program_trigger_impl(int argc, char **argv, int pid, std::string calltype, int c
             return -1;
         }
     } else if (calltype == "dlcall") {
-        int ret = program_call_impl(pid, trigger_targetso, trigger_targetfunc, arg);
+        int ret = program_dlcall_impl(pid, trigger_targetso, trigger_targetfunc, arg);
         if (ret != 0) {
             return -1;
         }
@@ -2846,7 +3025,11 @@ int program_triggerp(int argc, char **argv) {
 
     int pid = atoi(pidstr.c_str());
 
-    void *old_funcaddr = (void *) std::stoull(targetaddr.c_str());
+    uint64_t targetaddr_val = 0;
+    if (parse_u64(targetaddr.c_str(), targetaddr_val) != 0) {
+        return -1;
+    }
+    void *old_funcaddr = (void *) targetaddr_val;
 
     uint64_t target_args[6] = {0};
     int ret = wait_funccall_addr(pid, old_funcaddr, target_args);
@@ -2883,6 +3066,11 @@ int ini_hookso_env(int pid) {
 
     LOG("start ini hookso env");
 
+    glibcname = "";
+    gpcalladdr = 0;
+    gbackupcode = 0;
+    gpcallstack = 0;
+
     int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
     if (ret < 0) {
         ERR("ptrace %d PTRACE_ATTACH fail", pid);
@@ -2892,33 +3080,35 @@ int ini_hookso_env(int pid) {
     ret = waitpid(pid, NULL, 0);
     if (ret < 0) {
         ERR("ptrace %d waitpid fail", pid);
+        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
 
     std::string libcname;
-    void *plibcaddr;
+    void *plibcaddr = 0;
     ret = find_libc_name(pid, libcname, plibcaddr);
     if (ret != 0) {
-        return -1;
-    }
-    uint64_t code = 0;
-    ret = remote_process_read(pid, plibcaddr, &code, sizeof(code));
-    if (ret != 0) {
+        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
 
     glibcname = libcname;
     gpcalladdr = (char *) ((uint64_t) plibcaddr + 8); // Elf64_Ehdr e_ident[8-16]
+
+    uint64_t code = 0;
+    ret = remote_process_read(pid, gpcalladdr, &code, sizeof(code));
+    if (ret != 0) {
+        ptrace(PTRACE_DETACH, pid, 0, 0);
+        return -1;
+    }
     gbackupcode = code;
 
     uint64_t retval = 0;
     ret = syscall_so(pid, retval, syscall_sys_mmap, 0, callstack_len, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN,
                      -1, 0);
-    if (ret != 0) {
-        return -1;
-    }
-    if (retval == (uint64_t) (-1)) {
+    if (ret != 0 || linux_syscall_failed(retval)) {
+        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
     gpcallstack = (char *) retval;
@@ -2938,7 +3128,10 @@ int fini_hookso_env(int pid) {
     gallocmem.clear();
 
     uint64_t retval = 0;
-    syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
+    if (gpcallstack) {
+        syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
+        gpcallstack = 0;
+    }
 
     ptrace(PTRACE_DETACH, pid, 0, 0);
 
