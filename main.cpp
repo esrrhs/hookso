@@ -1035,7 +1035,7 @@ int find_mapped_so(int pid, bool (*match)(const std::string &), const char *what
         }).base(), targetso.end());
 
         if (match(targetso)) {
-            name = targetso;
+            name = path;
             sobeginstr = tmp[0];
             pos = sobeginstr.find_last_of("-");
             if (pos == -1) {
@@ -1067,6 +1067,98 @@ int find_libc_name(int pid, std::string &name, void *&psostart) {
 
 int find_libdl_name(int pid, std::string &name, void *&psostart) {
     return find_mapped_so(pid, is_libdl_soname, "libdl", name, psostart);
+}
+
+static bool maps_perms_exec(const std::string &perms) {
+    return perms.size() >= 3 && perms[2] == 'x';
+}
+
+int find_call_trampoline(int pid, const std::string &libcpath, void *libc_base, char *&out_addr) {
+    char maps_path[PATH_MAX];
+    sprintf(maps_path, "/proc/%d/maps", pid);
+    FILE *fd = fopen(maps_path, "r");
+    if (!fd) {
+        ERR("cannot open the memory maps, %s", strerror(errno));
+        return -1;
+    }
+
+    std::string libc_base_name = libcpath;
+    int slash = libcpath.find_last_of("/");
+    if (slash != -1) {
+        libc_base_name = libcpath.substr(slash + 1);
+    }
+
+    uint64_t vdso_rx = 0;
+    uint64_t libc_rx_hdr = 0;
+    uint64_t libc_rx_text = 0;
+
+    char buf[PROCMAPS_LINE_MAX_LENGTH];
+    while (!feof(fd)) {
+        if (fgets(buf, PROCMAPS_LINE_MAX_LENGTH, fd) == NULL) {
+            break;
+        }
+
+        std::vector<std::string> tmp;
+        const char *sep = "\t \r\n";
+        char *line = NULL;
+        for (char *token = strtok_r(buf, sep, &line); token != NULL; token = strtok_r(NULL, sep, &line)) {
+            tmp.push_back(token);
+        }
+        if (tmp.size() < 2) {
+            continue;
+        }
+
+        std::string range = tmp[0];
+        std::string perms = tmp[1];
+        if (!maps_perms_exec(perms)) {
+            continue;
+        }
+
+        int pos = range.find_last_of("-");
+        if (pos == -1) {
+            continue;
+        }
+        uint64_t start = std::strtoul(range.substr(0, pos).c_str(), 0, 16);
+
+        std::string path = tmp[tmp.size() - 1];
+        if (path == "(deleted)" && tmp.size() >= 2) {
+            path = tmp[tmp.size() - 2];
+        }
+
+        if (path == "[vdso]" && vdso_rx == 0) {
+            vdso_rx = start;
+            continue;
+        }
+
+        int slashpos = path.find_last_of("/");
+        std::string soname = (slashpos == -1) ? path : path.substr(slashpos + 1);
+        if (soname == libc_base_name || is_libc_soname(soname)) {
+            if (start == (uint64_t) libc_base && libc_rx_hdr == 0) {
+                libc_rx_hdr = start;
+            } else if (libc_rx_text == 0) {
+                libc_rx_text = start;
+            }
+        }
+    }
+    fclose(fd);
+
+    // Prefer [vdso]+8 (ELF ident padding on an RX page). Modern libc maps the
+    // ELF header as r--p, so libc_base+8 is not executable and SIGSEGVs.
+    if (vdso_rx != 0) {
+        out_addr = (char *) (vdso_rx + 8);
+        return 0;
+    }
+    if (libc_rx_hdr != 0) {
+        out_addr = (char *) (libc_rx_hdr + 8);
+        return 0;
+    }
+    if (libc_rx_text != 0) {
+        out_addr = (char *) libc_rx_text;
+        return 0;
+    }
+
+    ERR("not find executable trampoline in /proc/%d/maps", pid);
+    return -1;
 }
 
 int get_mem_mapping(int pid, std::vector<std::pair<uint64_t, uint64_t>> &mapping) {
@@ -3093,7 +3185,11 @@ int ini_hookso_env(int pid) {
     }
 
     glibcname = libcname;
-    gpcalladdr = (char *) ((uint64_t) plibcaddr + 8); // Elf64_Ehdr e_ident[8-16]
+    ret = find_call_trampoline(pid, libcname, plibcaddr, gpcalladdr);
+    if (ret != 0) {
+        ptrace(PTRACE_DETACH, pid, 0, 0);
+        return -1;
+    }
 
     uint64_t code = 0;
     ret = remote_process_read(pid, gpcalladdr, &code, sizeof(code));
