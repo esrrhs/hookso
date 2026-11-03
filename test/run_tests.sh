@@ -350,10 +350,33 @@ else
     fail "trigger dlclose"
 fi
 
-echo "== replacep + setfuncp + triggerp =="
+echo "== replace far text (mysleep in non-PIE exe) + setfunc restore =="
+# Same out-of-range layout as replacep: low .text in the executable -> high .so.
+# Requires -no-pie test binary and -rdynamic so mysleep is in .dynsym.
 MYSLEEP_ADDR=$(grep "MYSLEEP_ADDR=" "$OUT" | head -1 | cut -d= -f2)
 assert_has "mysleep addr" "$MYSLEEP_ADDR"
+FIND_MYSLEEP=$(run_hookso find "$TARGET_PID" "$TEST_BIN" mysleep) || true
+assert_has "find mysleep in test binary" "$FIND_MYSLEEP"
+FIND_MYSLEEP_ADDR=$(echo "$FIND_MYSLEEP" | awk '{print $2}')
+if [ -n "$FIND_MYSLEEP_ADDR" ] && [ "$FIND_MYSLEEP_ADDR" = "$MYSLEEP_ADDR" ]; then
+    pass "find mysleep addr matches MYSLEEP_ADDR"
+else
+    fail "find mysleep addr matches MYSLEEP_ADDR (got '$FIND_MYSLEEP_ADDR' want '$MYSLEEP_ADDR')"
+fi
 
+MARK=$(wc -l < "$OUT")
+REPL_FAR=$(retry_hookso replace "$TARGET_PID" "$TEST_BIN" mysleep "$LIBTESTNEW" mysleepnew) || true
+assert_has "replace mysleep far" "$REPL_FAR"
+FAR_BACKUP=$(echo "$REPL_FAR" | awk '{print $2}')
+if wait_after "$MARK" "mysleepnew"; then
+    pass "replace mysleep far active"
+else
+    fail "replace mysleep far active"
+fi
+SET_FAR=$(run_hookso setfunc "$TARGET_PID" "$TEST_BIN" mysleep "$FAR_BACKUP") || true
+assert_has "setfunc restore mysleep" "$SET_FAR"
+
+echo "== replacep + setfuncp + triggerp =="
 MARK=$(wc -l < "$OUT")
 REPLP=$(retry_hookso replacep "$TARGET_PID" "$MYSLEEP_ADDR" "$LIBTESTNEW" mysleepnew) || true
 assert_has "replacep mysleep" "$REPLP"

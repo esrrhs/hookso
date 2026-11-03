@@ -65,6 +65,15 @@ static bool rel32_out_of_range(uint64_t from_next_insn, uint64_t to) {
     return diff > (int64_t) INT32_MAX || diff < (int64_t) INT32_MIN;
 }
 
+// ET_EXEC (non-PIE) symbol values are linked virtual addresses.
+// ET_DYN (PIE / .so) symbol values are relative to the maps load base.
+static uint64_t runtime_sym_addr(uint64_t sobeginvalue, const Elf64_Ehdr &ehdr, uint64_t st_value) {
+    if (ehdr.e_type == ET_EXEC) {
+        return st_value;
+    }
+    return sobeginvalue + st_value;
+}
+
 void log(FILE *fd, const char *header, const char *file, const char *func, int pos, const char *fmt, ...) {
     time_t clock1;
     struct tm *tptr;
@@ -522,7 +531,7 @@ int find_so_func_addr_by_mem(int pid, const std::string &soname,
         Elf64_Shdr &s = setions[targetsym.st_shndx];
         std::string name = &shsectionname[s.sh_name];
         if (name == ".text") {
-            void *func = (void *) (sobeginvalue + targetsym.st_value);
+            void *func = (void *) runtime_sym_addr(sobeginvalue, targetso, targetsym.st_value);
             LOG("target text func addr %p", func);
             funcaddr_plt.clear();
             funcaddr = func;
@@ -846,7 +855,7 @@ int find_so_func_addr_by_file(int pid, const std::string &targetsopath,
         std::string name = &shsectionname[s.sh_name];
         if (name == ".text") {
             munmap(sofileaddr, sofilelen);
-            void *func = (void *) (sobeginvalue + targetsym.st_value);
+            void *func = (void *) runtime_sym_addr(sobeginvalue, targetso, targetsym.st_value);
             LOG("target text func addr %p", func);
             funcaddr_plt.clear();
             funcaddr = func;
@@ -2436,6 +2445,105 @@ int program_setfuncp(int argc, char **argv) {
     return 0;
 }
 
+
+// Patch remote .text at old_funcaddr so it jumps to new_funcaddr.
+// Prefer near jmp (e9 rel32); if out of range, allocate nearby memory for an
+// absolute pointer and use far jmp (ff 25 / jmpq *rel32(%rip)), same as replacep.
+static int patch_remote_text_jmp(int pid, void *old_funcaddr, void *new_funcaddr) {
+    char code[8] = {0};
+    int ret = 0;
+
+    if (rel32_out_of_range((uint64_t) old_funcaddr + 5, (uint64_t) new_funcaddr)) {
+        void *far_jmpq_addr_pointer = 0;
+        int far_jmpq_addr_pointer_len = 0;
+        ret = alloc_global_mem(pid, "replace", (uint64_t) old_funcaddr, sizeof(new_funcaddr), far_jmpq_addr_pointer,
+                               far_jmpq_addr_pointer_len);
+        if (ret < 0) {
+            return -1;
+        }
+
+        LOG("far jump addr pointer=%p", far_jmpq_addr_pointer);
+
+        if (rel32_out_of_range((uint64_t) old_funcaddr + 6, (uint64_t) far_jmpq_addr_pointer)) {
+            ERR("far jmp offset too far from %p to %p", old_funcaddr, far_jmpq_addr_pointer);
+            return -1;
+        }
+
+        int offset = (int) ((uint64_t) far_jmpq_addr_pointer - (uint64_t) old_funcaddr - 6);
+        LOG("far jump offset=%d", offset);
+
+        code[0] = 0xff;
+        code[1] = 0x25;
+        memcpy(&code[2], &offset, sizeof(offset));
+
+        struct user_regs_struct oldregs;
+        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+        if (ret < 0) {
+            ERR("ptrace %d PTRACE_GETREGS fail", pid);
+            return -1;
+        }
+
+        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+        bool running = false;
+        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+        if (ret < 0) {
+            return -1;
+        }
+
+        if (running) {
+            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
+            return -1;
+        }
+
+        ret = remote_process_write(pid, far_jmpq_addr_pointer, &new_funcaddr, sizeof(new_funcaddr));
+        if (ret != 0) {
+            return -1;
+        }
+
+        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        if (ret != 0) {
+            return -1;
+        }
+
+        LOG("patch far text jmp ok from %p to %p via %p", old_funcaddr, new_funcaddr, far_jmpq_addr_pointer);
+        return 0;
+    }
+
+    int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
+
+    code[0] = 0xe9;
+    memcpy(&code[1], &offset, sizeof(offset));
+
+    struct user_regs_struct oldregs;
+    ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
+    if (ret < 0) {
+        ERR("ptrace %d PTRACE_GETREGS fail", pid);
+        return -1;
+    }
+
+    LOG("cur rip=%lu", (uint64_t) oldregs.rip);
+
+    bool running = false;
+    ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
+    if (ret < 0) {
+        return -1;
+    }
+
+    if (running) {
+        ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
+        return -1;
+    }
+
+    ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+    if (ret != 0) {
+        return -1;
+    }
+
+    LOG("patch near text jmp ok from %p to %p", old_funcaddr, new_funcaddr);
+    return 0;
+}
+
 int program_replace(int argc, char **argv) {
 
     if (argc < 7) {
@@ -2490,7 +2598,7 @@ int program_replace(int argc, char **argv) {
     LOG("new %s %s=%p offset=%d", targetso.c_str(), targetfunc.c_str(), new_funcaddr, new_funcaddr_plt.size());
 
     if (old_funcaddr_plt.size() == 0) {
-        // func in .so
+        // func in .text (local definition)
         uint64_t backup = 0;
         ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
         if (ret != 0) {
@@ -2498,43 +2606,7 @@ int program_replace(int argc, char **argv) {
             return -1;
         }
 
-        if (rel32_out_of_range((uint64_t) old_funcaddr + 5, (uint64_t) new_funcaddr)) {
-            ERR("jmp offset too far from %p to %p", (void *) old_funcaddr, (void *) new_funcaddr);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
-
-        char code[8] = {0};
-        code[0] = 0xe9;
-        memcpy(&code[1], &offset, sizeof(offset));
-
-        // check
-        struct user_regs_struct oldregs;
-        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
-
-        bool running = false;
-        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
-        if (ret < 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        if (running) {
-            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        ret = patch_remote_text_jmp(pid, old_funcaddr, new_funcaddr);
         if (ret != 0) {
             close_so(pid, handle);
             return -1;
@@ -2643,106 +2715,9 @@ int program_replacep(int argc, char **argv) {
             targetfunc.c_str(), new_funcaddr);
         printf("%lu\t%lu\t%lu\n", handle, (uint64_t) gotaddr, backup);
 
-    } else if (rel32_out_of_range((uint64_t) old_funcaddr + 5, (uint64_t) new_funcaddr)) {
-
-        void *far_jmpq_addr_pointer = 0;
-        int far_jmpq_addr_pointer_len = 0;
-        ret = alloc_global_mem(pid, "replace", (uint64_t) old_funcaddr, sizeof(new_funcaddr), far_jmpq_addr_pointer,
-                               far_jmpq_addr_pointer_len);
-        if (ret < 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        LOG("far jump addr pointer=%p", far_jmpq_addr_pointer);
-
-        if (rel32_out_of_range((uint64_t) old_funcaddr + 6, (uint64_t) far_jmpq_addr_pointer)) {
-            ERR("far jmp offset too far from %p to %p", old_funcaddr, far_jmpq_addr_pointer);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        int offset = (int) ((uint64_t) far_jmpq_addr_pointer - (uint64_t) old_funcaddr - 6);
-        LOG("far jump offset=%d", offset);
-
-        char code[8] = {0};
-        code[0] = 0xff;
-        code[1] = 0x25;
-        memcpy(&code[2], &offset, sizeof(offset));
-
-        // check
-        struct user_regs_struct oldregs;
-        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
-
-        bool running = false;
-        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
-        if (ret < 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        if (running) {
-            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        ret = remote_process_write(pid, far_jmpq_addr_pointer, &new_funcaddr, sizeof(new_funcaddr));
-        if (ret != 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
-        if (ret != 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        LOG("replace far text func ok from %s=%p to %s %s=%p", srcaddr.c_str(), old_funcaddr, targetso.c_str(),
-            targetfunc.c_str(), new_funcaddr);
-        printf("%lu\t%lu\t%lu\n", handle, (uint64_t) old_funcaddr, backup);
-
     } else {
-
-        int offset = (int) ((uint64_t) new_funcaddr - ((uint64_t) old_funcaddr + 5));
-
-        char code[8] = {0};
-        code[0] = 0xe9;
-        memcpy(&code[1], &offset, sizeof(offset));
-
-        // check
-        struct user_regs_struct oldregs;
-        ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        LOG("cur rip=%lu", (uint64_t) oldregs.rip);
-
-        bool running = false;
-        ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
-        if (ret < 0) {
-            close_so(pid, handle);
-            return -1;
-        }
-
-        if (running) {
-            ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
-            close_so(pid, handle);
-            return -1;
-        }
-
-        ret = remote_process_write(pid, old_funcaddr, code, sizeof(code));
+        // .text near or far jump
+        ret = patch_remote_text_jmp(pid, old_funcaddr, new_funcaddr);
         if (ret != 0) {
             close_so(pid, handle);
             return -1;
