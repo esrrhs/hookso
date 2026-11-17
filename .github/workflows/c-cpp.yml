@@ -22,3 +22,6 @@ jobs:
       run: sudo sysctl -w kernel.yama.ptrace_scope=0 || true
     - name: test
       run: bash test/run_tests.sh
+    - name: fork injection regressions
+      timeout-minutes: 3
+      run: python3 test/run_fork_tests.py --hookso ./hookso --repeat 3

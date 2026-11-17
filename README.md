@@ -22,7 +22,7 @@ hookso does not start a helper thread inside the target. It stops the process, w
 
 ```mermaid
 flowchart TB
-  A[PTRACE_ATTACH] --> B[Pick an RX trampoline<br/>prefer vdso+8]
+  A[PTRACE_SEIZE + INTERRUPT] --> B[Pick an RX trampoline<br/>prefer vdso+8]
   B --> C[mmap a call stack]
   C --> D{What next?}
   D -->|syscall / call / dlopen| E[Write stub, set regs, CONT]
@@ -35,7 +35,11 @@ flowchart TB
 
 ### 1. Attach
 
-`PTRACE_ATTACH` then `waitpid` leaves the target stopped at an instruction boundary. Memory and register access happen in that state. If setup fails after attach, hookso `DETACH`s so the target is not left in SIGSTOP.
+`PTRACE_SEIZE` + `PTRACE_INTERRUPT` obtains a classified ptrace stop without
+injecting an attach `SIGSTOP`. Real signals racing the initial interrupt are
+forwarded in the original business context. Only a single-threaded target that
+remains single-threaded is supported; existing multithreaded targets are rejected
+before attach. Memory and register access happen while the traced thread is stopped.
 
 ### 2. Trampoline: 8 bytes of code in the target
 
@@ -46,7 +50,21 @@ To make the **target** execute `mmap`, `dlopen`, or an arbitrary function, hooks
 | Remote syscall | `0f 05 cc` | `syscall; int3` |
 | Remote call | `ff d0 cc` | `callq *%rax; int3` |
 
-`int3` returns control to hookso (`SIGTRAP`). The original 8 bytes and registers are then restored.
+`int3` returns control to hookso. Completion requires the expected `SIGTRAP`
+source **and RIP = trampoline + 3**, not merely any `SIGTRAP`. The original
+8 bytes, general registers, `orig_rax`, extended x87/SSE/AVX state, and signal
+mask are restored. Host syscall restart state is preserved rather than reused
+for the injected operation.
+
+During remote execution, asynchronous business signals are temporarily
+blocked with `PTRACE_SETSIGMASK`: `SIGCHLD`/`SIGPROF` remain kernel-pending until
+the host context is restored and execution resumes. Standard signals can still
+coalesce normally; this is not an exact event queue. No business handler is
+intentionally run on temporary registers/stack. Synchronous fault signals
+remain unblocked (to avoid Linux resetting a blocked fault handler to default),
+but ptrace intercepts them before handler delivery. An external `SIGTRAP` aborts the
+operation and is delivered after restoration; an unexpected synchronous trap
+or fault in injected code is reported as injection failure, not success.
 
 Trampoline location, in order:
 
@@ -113,13 +131,45 @@ flowchart TB
 
 ### 6. Catching one call: `arg` / `trigger`
 
-An `int3` is written at the entry, then `CONT` waits for the next hit:
+A thread-local hardware execution breakpoint waits for the next entry:
 
-- RIP is decremented by 1 and the original bytes are restored
-- Arguments are read as `rdi, rsi, rdx, rcx, r8, r9` (the 4th is `rcx`, not syscall `r10`)
-- `trigger` can pass them on with `@1` meaning “first argument of the call just caught”
+- `SIGTRAP` must have `TRAP_HWBKPT` and RIP equal to the requested entry
+- Real business signals, including application `SIGTRAP`, are forwarded normally
+- Original debug registers are restored; existing active hardware breakpoints are refused
+- No entry bytes are modified, and Linux does not copy this ptrace hardware breakpoint into fork children
+- Arguments are read as `rdi, rsi, rdx, rcx, r8, r9`
+- `trigger` accepts `@1` for the first argument of the call just caught
 
-If the target is executing the bytes being patched, the patch is refused so those instructions are not torn.
+Thus a single-threaded parent may keep forking while `arg` waits, without
+fork children inheriting a temporary entry `int3`. The parent's normal fork
+loop is **not** running concurrently when that same thread executes a remote call.
+
+### Cancellation and support boundaries
+
+`HOOKSO_TIMEOUT_MS` sets a per-wait deadline (default 10000 ms, valid range
+1..3600000). SIGINT/SIGTERM/SIGHUP/SIGQUIT request cancellation. Recovery uses
+`PTRACE_INTERRUPT`, restores breakpoint/context state, and checks detach errors.
+A business job-control signal interrupts the operation instead of being swallowed.
+
+**Not transactional:** aborting an arbitrary C/C++ call cannot roll back its
+heap/TLS/errno changes, acquired locks, constructors, I/O, or other side effects.
+After a remote-call abort hookso does not execute further remote cleanup calls;
+it reports retained temporary mappings and possible callee side effects. SIGKILL,
+uninterruptible kernel waits and failed ptrace recovery cannot guarantee cleanup.
+Do not inject into an arbitrary non-reentrant runtime critical section; prefer a
+cooperative Lua/host safe point. This does not make all programs injection-safe.
+
+The target must not create threads during the session. Remote callees and
+constructors must not fork/exec, change the signal mask, or wait for blocked
+signals/handlers; these behaviors are unsupported. Direct fork/clone/exec syscall
+injection is explicitly refused. Arbitrary callees/constructors are not
+syscall-sandboxed, so those preconditions are not dynamically enforced.
+No all-thread freeze is used. Children created
+by normal business fork are not traced; they may inherit unused temporary data
+mappings and persistent library/hook state. Parent cleanup does not clean child
+snapshots. Successful child exec replaces the old image; the pre-exec window and
+exec failures still matter. pLua session/timer/output-file fork policy is outside
+this injector fix.
 
 ## Quick start
 
@@ -142,13 +192,25 @@ Full command list and walkthrough: **[Usage](./README_USAGE.md)**.
 ./hookso arg      <pid> so func 1
 ```
 
-Tests: `bash test/run_tests.sh` (needs ptrace; CI sets `yama.ptrace_scope=0`).
+Tests (Linux x86-64, ptrace required; CI sets `yama.ptrace_scope=0`):
+
+```bash
+bash test/run_tests.sh
+python3 test/run_fork_tests.py --hookso ./hookso --repeat 5
+```
+
+The fork suite builds owned fixtures in a private temporary directory. It covers
+fork and fork+exec parent liveness/reaping, real dlopen constructors, deferred
+SIGPROF/SIGCHLD, signal storms, application/unexpected traps, SIMD state, blocked
+read restart, timeout/cancellation, job-control preservation and multithread
+rejection. It reaps fixture descendants and logs each cleanup; no real service
+process is attached. `HOOKSO`/`TEST_DIR` can override legacy-suite build paths.
 
 ## Limits
 
 - x86-64 only; syscall / call / dlcall take at most 6 integer or string arguments
 - `replace` requires matching signatures or the target will crash
-- Only the given pid's thread is attached; other threads can still race a patch
+- Single-thread targets only, including throughout the session; multithreaded targets are rejected
 - If a `.so` is not fully mapped, pass a **file path** instead of the soname
 
 ## Who is using it

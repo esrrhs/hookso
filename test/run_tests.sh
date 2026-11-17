@@ -5,8 +5,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOKSO="$ROOT/hookso"
-TEST_DIR="$ROOT/test"
+HOOKSO="${HOOKSO:-$ROOT/hookso}"
+TEST_DIR="${TEST_DIR:-$ROOT/test}"
 TEST_BIN="$TEST_DIR/test"
 LIBTEST="$TEST_DIR/libtest.so"
 LIBTESTNEW="$TEST_DIR/libtestnew.so"

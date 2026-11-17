@@ -41,6 +41,8 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <stddef.h>
 
 #define PROCMAPS_LINE_MAX_LENGTH (PATH_MAX + 100)
 
@@ -1230,253 +1232,154 @@ const int syscall_sys_mmap = 9;
 const int syscall_sys_mprotect = 10;
 const int syscall_sys_munmap = 11;
 
+// ptrace is per-thread. Do not freeze lock owners and then dlopen: currently
+// require a target that is and remains single-threaded throughout injection.
+static bool target_single_thread(int pid) {
+    char path[64]; snprintf(path, sizeof(path), "/proc/%d/task", pid);
+    DIR *d = opendir(path);
+    if (!d) return false;
+    int n = 0;
+    while (dirent *e = readdir(d)) if (isdigit(e->d_name[0])) ++n;
+    closedir(d);
+    if (n != 1) ERR("unsupported multithreaded target (%d threads); use a cooperative safe point", n);
+    return n == 1;
+}
+static volatile sig_atomic_t gcancel = 0;
+static bool gattached = false, gstopped = false, gremote_failed = false;
+static int gdetach_signal = 0;
+static siginfo_t gdetach_info;
+static void request_cancel(int sig) { gcancel = sig; }
+static double monotime() {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+static double wait_timeout() {
+    const char *v = getenv("HOOKSO_TIMEOUT_MS");
+    if (!v) return 10.0;
+    char *end = NULL; long ms = strtol(v, &end, 10);
+    return end != v && *end == 0 && ms > 0 && ms <= 3600000 ? ms / 1000.0 : 10.0;
+}
+// Interrupt obtains a recovery stop without delivering a business SIGSTOP.
+static int wait_stop(int pid, int &status, double deadline) {
+    bool interrupted = false;
+    double recovery_deadline = 0;
+    for (;;) {
+        int r = waitpid(pid, &status, __WALL | WNOHANG);
+        if (r == pid) {
+            gstopped = WIFSTOPPED(status);
+            if (!gstopped) { ERR("target exited during injection (status %#x)", status); gattached = false; }
+            return gstopped && !interrupted ? 0 : -1;
+        }
+        if (r < 0 && errno != EINTR) { ERR("waitpid failed: %s", strerror(errno)); return -1; }
+        if (!interrupted && (monotime() >= deadline || gcancel)) {
+            ERR("%s waiting for target", gcancel ? "cancelled" : "timeout");
+            if (ptrace(PTRACE_INTERRUPT, pid, 0, 0) < 0) return -1;
+            interrupted = true; recovery_deadline = monotime() + 2.0;
+        }
+        if (interrupted && monotime() >= recovery_deadline) {
+            ERR("cannot stop target for recovery; cleanup incomplete"); return -1;
+        }
+        struct timespec pause = {0, 1000000}; nanosleep(&pause, NULL);
+    }
+}
+static int continue_target(int pid, int sig = 0) {
+    if (ptrace(PTRACE_CONT, pid, 0, sig) < 0) { ERR("PTRACE_CONT: %s", strerror(errno)); return -1; }
+    gstopped = false;
+    return 0;
+}
+static bool breakpoint_stop(int pid, int status, uint64_t rip, int code) {
+    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP || (status >> 16)) return false;
+    siginfo_t si; struct user_regs_struct regs;
+    return ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0 &&
+           (si.si_code == code || (code == TRAP_BRKPT && si.si_code == SI_KERNEL)) &&
+           ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0 && regs.rip == rip;
+}
+static void preserve_stop_signal(int pid, int status) {
+    if (WIFSTOPPED(status) && !(status >> 16)) {
+        siginfo_t si;
+        if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0) {
+            gdetach_signal = WSTOPSIG(status); gdetach_info = si;
+        }
+    }
+}
+static int remote_invoke(int pid, uint64_t &retval, bool syscall_call, uint64_t address,
+                         uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    retval = (uint64_t)-1;
+    if (syscall_call && (address == 56 || address == 57 || address == 58 || address == 59 ||
+                         address == 322 || address == 435)) {
+        ERR("fork/clone/exec syscalls cannot safely run on the injection trampoline"); return -1;
+    }
+    if (gremote_failed || !gstopped || !target_single_thread(pid)) return -1;
+    struct user_regs_struct saved, regs;
+    uint64_t mask = 0;
+    std::vector<unsigned char> xstate(65536);
+    struct iovec xio = {xstate.data(), xstate.size()};
+    // NT_X86_XSTATE covers x87/SSE/AVX and enabled extended features.
+    if (ptrace(PTRACE_GETREGS, pid, 0, &saved) < 0 ||
+        ptrace(PTRACE_GETREGSET, pid, (void *)0x202, &xio) < 0 ||
+        ptrace(PTRACE_GETSIGMASK, pid, sizeof(mask), &mask) < 0) {
+        ERR("cannot save complete remote context: %s", strerror(errno)); return -1;
+    }
+    uint64_t blocked = ~(uint64_t)0;
+    // Do not block synchronous fault signals: force_sig() can reset a blocked
+    // signal's disposition to SIG_DFL. ptrace intercepts these before handlers
+    // run; unexpected stops abort, with external signals delivered on detach.
+    const int unblocked[] = {SIGKILL, SIGSTOP, SIGTRAP, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGSYS};
+    for (int sig : unblocked) blocked &= ~(1ULL << (sig-1));
+    if (ptrace(PTRACE_SETSIGMASK, pid, sizeof(blocked), &blocked) < 0) {
+        ERR("cannot block signals during remote execution: %s", strerror(errno)); return -1;
+    }
+    char code[8] = {char(syscall_call ? 0x0f : 0xff), char(syscall_call ? 0x05 : 0xd0), char(0xcc),
+                    char(0x90), char(0x90), char(0x90), char(0x90), char(0x90)};
+    regs = saved; regs.rip = (uint64_t)gpcalladdr;
+    // Prevent a host syscall restart from overwriting the trampoline registers.
+    // Restore original orig_rax/rax/rip as a unit afterwards.
+    regs.orig_rax = (uint64_t)-1; regs.rax = address;
+    regs.rdi = a1; regs.rsi = a2; regs.rdx = a3;
+    if (syscall_call) regs.r10 = a4;
+    else {
+        regs.rcx = a4;
+        regs.rbp = (uint64_t)(gpcallstack + callstack_len - 16);
+        regs.rsp = (uint64_t)(gpcallstack + callstack_len - 32);
+    }
+    regs.r8 = a5; regs.r9 = a6;
+    bool ok = remote_process_write(pid, gpcalladdr, code, sizeof(code)) == 0 &&
+              ptrace(PTRACE_SETREGS, pid, 0, &regs) == 0 && continue_target(pid) == 0;
+    int status = 0;
+    if (ok) {
+        ok = wait_stop(pid, status, monotime() + wait_timeout()) == 0 &&
+             breakpoint_stop(pid, status, (uint64_t)gpcalladdr + 3, TRAP_BRKPT);
+        if (!ok) {
+            ERR("remote operation did not reach its completion breakpoint; restoring context (callee side effects cannot be rolled back)");
+            // Retain external signals, but do not deliver an injection's own
+            // synchronous fault as if it originated in the restored host code.
+            if (gstopped && !(status >> 16)) {
+                siginfo_t si;
+                if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0 &&
+                    (si.si_code <= 0 || WSTOPSIG(status) == SIGSTOP)) preserve_stop_signal(pid, status);
+            }
+        } else if (ptrace(PTRACE_GETREGS, pid, 0, &regs) < 0) ok = false;
+        else retval = regs.rax;
+    }
+    bool restored = gstopped;
+    if (gstopped) {
+        // Unblock only after memory, extended state and host registers are back.
+        if (remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode)) < 0) restored = false;
+        if (ptrace(PTRACE_SETREGSET, pid, (void *)0x202, &xio) < 0) restored = false;
+        if (ptrace(PTRACE_SETREGS, pid, 0, &saved) < 0) restored = false;
+        if (restored && ptrace(PTRACE_SETSIGMASK, pid, sizeof(mask), &mask) < 0) restored = false;
+    }
+    if (!restored) ERR("remote context recovery incomplete");
+    if (!ok || !restored) { gremote_failed = true; return -1; }
+    return 0;
+}
 int funccall_so(int pid, uint64_t &retval, void *funcaddr, uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
                 uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
-
-    struct user_regs_struct oldregs;
-    int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_GETREGS fail", pid);
-        return -1;
-    }
-
-    char code[8] = {0};
-    // ff d0 : callq *%rax
-    code[0] = 0xff;
-    code[1] = 0xd0;
-    // cc    : int3
-    code[2] = 0xcc;
-    // nop
-    memset(&code[3], 0x90, sizeof(code) - 3);
-
-    // setup registers
-    struct user_regs_struct regs = oldregs;
-    regs.rip = (uint64_t) gpcalladdr;
-    regs.rbp = (uint64_t) (gpcallstack + callstack_len - 16);
-    // rsp must be aligned to a 16-byte boundary
-    regs.rsp = (uint64_t) (gpcallstack + callstack_len - (2 * 16));
-    regs.rax = (uint64_t) funcaddr;
-    regs.rdi = arg1;
-    regs.rsi = arg2;
-    regs.rdx = arg3;
-    regs.rcx = arg4;
-    regs.r8 = arg5;
-    regs.r9 = arg6;
-
-    ret = remote_process_write(pid, gpcalladdr, code, sizeof(code));
-    if (ret < 0) {
-        return -1;
-    }
-
-    int errsv = 0;
-    int status = 0;
-
-    ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        errsv = -1;
-    }
-
-    if (!errsv) {
-        ret = ptrace(PTRACE_CONT, pid, 0, 0);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_CONT fail", pid);
-            errsv = -1;
-        }
-    }
-
-    while (!errsv) {
-        ret = waitpid(pid, &status, 0);
-        if (ret == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            ERR("waitpid error: %d %s", errno, strerror(errno));
-            errsv = errno;
-            break;
-        }
-
-        if (WIFSTOPPED(status)) {
-            if (WSTOPSIG(status) == SIGTRAP) {
-                // ok
-                break;
-            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
-                ret = ptrace(PTRACE_CONT, pid, 0, 0);
-                if (ret < 0) {
-                    ERR("ptrace %d PTRACE_CONT fail", pid);
-                    errsv = -1;
-                    break;
-                }
-                continue;
-            } else {
-                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
-                errsv = -1;
-                break;
-            }
-        } else if (WIFEXITED(status)) {
-            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
-            errsv = -1;
-            break;
-        } else if (WIFSIGNALED(status)) {
-            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
-            errsv = -1;
-            break;
-        } else {
-            ERR("unexpected waitpid status: 0x%x", status);
-            errsv = -1;
-            break;
-        }
-    }
-
-    if (!errsv) {
-        int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            errsv = -1;
-        } else {
-            retval = regs.rax;
-        }
-    }
-    if (errsv) {
-        retval = -1;
-    }
-
-    ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
-        return -1;
-    }
-
-    ret = remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
-    if (ret < 0) {
-        return -1;
-    }
-
-    return errsv ? -1 : 0;
+    return remote_invoke(pid, retval, false, (uint64_t)funcaddr, arg1, arg2, arg3, arg4, arg5, arg6);
 }
-
 int syscall_so(int pid, uint64_t &retval, uint64_t syscallno, uint64_t arg1 = 0, uint64_t arg2 = 0,
                uint64_t arg3 = 0, uint64_t arg4 = 0, uint64_t arg5 = 0, uint64_t arg6 = 0) {
-
-    struct user_regs_struct oldregs;
-    int ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_GETREGS fail", pid);
-        return -1;
-    }
-
-    char code[8] = {0};
-    // 0f 05 : syscall
-    code[0] = 0x0f;
-    code[1] = 0x05;
-    // cc    : int3
-    code[2] = 0xcc;
-    // nop
-    memset(&code[3], 0x90, sizeof(code) - 3);
-
-    // setup registers
-    struct user_regs_struct regs = oldregs;
-    regs.rip = (uint64_t) gpcalladdr;
-    regs.rax = syscallno;
-    regs.rdi = arg1;
-    regs.rsi = arg2;
-    regs.rdx = arg3;
-    regs.r10 = arg4;
-    regs.r8 = arg5;
-    regs.r9 = arg6;
-
-    ret = remote_process_write(pid, gpcalladdr, code, sizeof(code));
-    if (ret < 0) {
-        return -1;
-    }
-
-    int errsv = 0;
-    int status = 0;
-
-    ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        errsv = -1;
-    }
-
-    if (!errsv) {
-        ret = ptrace(PTRACE_CONT, pid, 0, 0);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_CONT fail", pid);
-            errsv = -1;
-        }
-    }
-
-    while (!errsv) {
-        ret = waitpid(pid, &status, 0);
-        if (ret == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            ERR("waitpid error: %d %s", errno, strerror(errno));
-            errsv = errno;
-            break;
-        }
-
-        if (WIFSTOPPED(status)) {
-            if (WSTOPSIG(status) == SIGTRAP) {
-                // ok
-                break;
-            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
-                ret = ptrace(PTRACE_CONT, pid, 0, 0);
-                if (ret < 0) {
-                    ERR("ptrace %d PTRACE_CONT fail", pid);
-                    errsv = -1;
-                    break;
-                }
-                continue;
-            } else {
-                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
-                errsv = -1;
-                break;
-            }
-        } else if (WIFEXITED(status)) {
-            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
-            errsv = -1;
-            break;
-        } else if (WIFSIGNALED(status)) {
-            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
-            errsv = -1;
-            break;
-        } else {
-            ERR("unexpected waitpid status: 0x%x", status);
-            errsv = -1;
-            break;
-        }
-    }
-
-    if (!errsv) {
-        int ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            errsv = -1;
-        } else {
-            retval = regs.rax;
-        }
-    }
-    if (errsv) {
-        retval = -1;
-    }
-
-    ret = ptrace(PTRACE_SETREGS, pid, 0, &oldregs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
-        return -1;
-    }
-
-    ret = remote_process_write(pid, gpcalladdr, &gbackupcode, sizeof(gbackupcode));
-    if (ret < 0) {
-        return -1;
-    }
-
-    return errsv ? -1 : 0;
+    return remote_invoke(pid, retval, true, syscallno, arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 #pragma pack(1)
@@ -2731,172 +2634,59 @@ int program_replacep(int argc, char **argv) {
     return 0;
 }
 
-int grecoverpid;
-void *grecoverfuncaddr;
-uint64_t grecovercode;
-
-void backup_function(int sig) {
-    (void) sig;
-    if (grecoverpid > 0) {
-        remote_process_write(grecoverpid, grecoverfuncaddr, &grecovercode, sizeof(grecovercode));
-        grecoverpid = 0;
-    }
-    exit(0);
-}
-
+// A thread-local hardware breakpoint leaves no temporary int3 in a fork
+// child's code. Linux clears ptrace hardware breakpoints in the new child.
 int wait_funccall_addr(int pid, void *old_funcaddr, uint64_t args[]) {
-
-    LOG("start parse so file %p", old_funcaddr);
-
-    uint64_t backup = 0;
-    int ret = remote_process_read(pid, old_funcaddr, &backup, sizeof(backup));
-    if (ret != 0) {
-        return -1;
-    }
-
-    LOG("arg %p backup=%lu", old_funcaddr, backup);
-
-    struct user_regs_struct oldregs;
-    ret = ptrace(PTRACE_GETREGS, pid, 0, &oldregs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_GETREGS fail", pid);
-        return -1;
-    }
-
-    LOG("cur rip=%lu", (uint64_t) oldregs.rip);
-
-    uint64_t newcode = 0;
-    char *code = (char *) &newcode;
-    // cc    : int3
-    code[0] = 0xcc;
-    // nop
-    memset(&code[1], 0x90, sizeof(code) - 1);
-
-    bool running = false;
-    ret = check_callstack_func_running(pid, (uint64_t) old_funcaddr, sizeof(code), running);
-    if (ret < 0) {
-        return -1;
-    }
-
-    if (running) {
-        ERR("%d target func %p %u is running, try again", pid, old_funcaddr, (uint64_t) old_funcaddr);
-        return -1;
-    }
-
-    ret = remote_process_write(pid, old_funcaddr, &newcode, sizeof(newcode));
-    if (ret != 0) {
-        return -1;
-    }
-
-    grecoverpid = pid;
-    grecoverfuncaddr = old_funcaddr;
-    grecovercode = backup;
-    signal(SIGTERM, backup_function);
-    signal(SIGHUP, backup_function);
-    signal(SIGINT, backup_function);
-    signal(SIGQUIT, backup_function);
-    signal(SIGUSR1, backup_function);
-
-    LOG("set code=%lu", newcode);
-
-    int errsv = 0;
+    if (!target_single_thread(pid)) return -1;
+    const size_t dr0off = offsetof(struct user, u_debugreg[0]);
+    const size_t dr6off = offsetof(struct user, u_debugreg[6]);
+    const size_t dr7off = offsetof(struct user, u_debugreg[7]);
+    errno = 0;
+    long dr0 = ptrace(PTRACE_PEEKUSER, pid, dr0off, 0);
+    if (errno) return -1;
+    long dr6 = ptrace(PTRACE_PEEKUSER, pid, dr6off, 0);
+    if (errno) return -1;
+    long dr7 = ptrace(PTRACE_PEEKUSER, pid, dr7off, 0);
+    if (errno) return -1;
+    if (dr7 & 0xff) { ERR("hardware breakpoint already in use; refusing arg/trigger"); return -1; }
+    int result = -1;
+    bool armed = ptrace(PTRACE_POKEUSER, pid, dr0off, old_funcaddr) == 0 &&
+                 ptrace(PTRACE_POKEUSER, pid, dr7off, (dr7 & ~0xf000fL) | 1L) == 0;
+    if (!armed) ERR("cannot install hardware execution breakpoint: %s", strerror(errno));
+    const double deadline = monotime() + wait_timeout();
     int status = 0;
-
-    ret = ptrace(PTRACE_CONT, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_CONT fail", pid);
-        errsv = -1;
-    }
-
-    while (!errsv) {
-        ret = waitpid(pid, &status, 0);
-        if (ret == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            ERR("waitpid error: %d %s", errno, strerror(errno));
-            errsv = errno;
-            break;
-        }
-
-        if (WIFSTOPPED(status)) {
-            if (WSTOPSIG(status) == SIGTRAP) {
-                // ok
-                break;
-            } else if (WSTOPSIG(status) == SIGALRM || WSTOPSIG(status) == SIGPROF || WSTOPSIG(status) == SIGCHLD) {
-                ret = ptrace(PTRACE_CONT, pid, 0, 0);
-                if (ret < 0) {
-                    ERR("ptrace %d PTRACE_CONT fail", pid);
-                    errsv = -1;
-                    break;
+    if (armed && continue_target(pid) == 0) {
+        while (wait_stop(pid, status, deadline) == 0) {
+            if (breakpoint_stop(pid, status, (uint64_t)old_funcaddr, TRAP_HWBKPT)) {
+                struct user_regs_struct regs;
+                if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) {
+                    args[0] = regs.rdi; args[1] = regs.rsi; args[2] = regs.rdx;
+                    args[3] = regs.rcx; args[4] = regs.r8; args[5] = regs.r9;
+                    result = 0;
                 }
-                continue;
-            } else {
-                ERR("the target process unexpectedly stopped by signal %d", WSTOPSIG(status));
-                errsv = -1;
                 break;
             }
-        } else if (WIFEXITED(status)) {
-            ERR("the target process unexpectedly terminated with exit code %d", WEXITSTATUS(status));
-            errsv = -1;
-            break;
-        } else if (WIFSIGNALED(status)) {
-            ERR("the target process unexpectedly terminated by signal %d", WTERMSIG(status));
-            errsv = -1;
-            break;
-        } else {
-            ERR("unexpected waitpid status: 0x%x", status);
-            errsv = -1;
-            break;
+            if (status >> 16) { ERR("unexpected ptrace event while waiting for function"); break; }
+            siginfo_t si;
+            if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) < 0) { ERR("unsupported group stop"); gremote_failed = true; break; }
+            if (WSTOPSIG(status) == SIGSTOP || WSTOPSIG(status) == SIGTSTP ||
+                WSTOPSIG(status) == SIGTTIN || WSTOPSIG(status) == SIGTTOU) {
+                preserve_stop_signal(pid, status); gremote_failed = true;
+                ERR("job-control signal interrupted function wait; preserving on detach"); break;
+            }
+            // Business context: deliver real signals (including application
+            // SIGTRAP), never confuse them with our execution breakpoint.
+            if (continue_target(pid, WSTOPSIG(status)) < 0) break;
         }
     }
-
-    struct user_regs_struct regs;
-    if (!errsv) {
-        ret = ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        if (ret < 0) {
-            ERR("ptrace %d PTRACE_GETREGS fail", pid);
-            errsv = -1;
-        }
+    bool restored = gstopped;
+    if (gstopped) {
+        if (ptrace(PTRACE_POKEUSER, pid, dr7off, dr7) < 0) restored = false;
+        if (ptrace(PTRACE_POKEUSER, pid, dr0off, dr0) < 0) restored = false;
+        if (ptrace(PTRACE_POKEUSER, pid, dr6off, dr6) < 0) restored = false;
     }
-
-    ret = remote_process_write(pid, old_funcaddr, &backup, sizeof(backup));
-    if (ret != 0) {
-        return -1;
-    }
-
-    grecoverpid = 0;
-    grecoverfuncaddr = 0;
-    grecovercode = 0;
-    signal(SIGTERM, SIG_DFL);
-    signal(SIGHUP, SIG_DFL);
-    signal(SIGINT, SIG_DFL);
-    signal(SIGQUIT, SIG_DFL);
-    signal(SIGUSR1, SIG_DFL);
-
-    LOG("set back=%lu", backup);
-
-    if (errsv != 0) {
-        return -1;
-    }
-
-    LOG("get regs rip=%lu", (uint64_t) regs.rip);
-
-    regs.rip--;
-    ret = ptrace(PTRACE_SETREGS, pid, 0, &regs);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_SETREGS fail", pid);
-        return -1;
-    }
-
-    args[0] = regs.rdi;
-    args[1] = regs.rsi;
-    args[2] = regs.rdx;
-    args[3] = regs.rcx;
-    args[4] = regs.r8;
-    args[5] = regs.r9;
-
-    return 0;
+    if (!restored) ERR("hardware breakpoint recovery incomplete");
+    return restored ? result : -1;
 }
 
 int wait_funccall_so(int pid, const std::string &targetso, const std::string &targetfunc, uint64_t args[]) {
@@ -3138,16 +2928,30 @@ int ini_hookso_env(int pid) {
     gbackupcode = 0;
     gpcallstack = 0;
 
-    int ret = ptrace(PTRACE_ATTACH, pid, 0, 0);
-    if (ret < 0) {
-        ERR("ptrace %d PTRACE_ATTACH fail", pid);
-        return -1;
+    if (!target_single_thread(pid)) return -1;
+    gattached = gstopped = gremote_failed = false;
+    gdetach_signal = 0; gcancel = 0;
+    signal(SIGINT, request_cancel); signal(SIGTERM, request_cancel);
+    signal(SIGHUP, request_cancel); signal(SIGQUIT, request_cancel);
+    // No attach-generated SIGSTOP racing with business SIGCHLD/SIGPROF.
+    int ret = ptrace(PTRACE_SEIZE, pid, 0, 0);
+    if (ret < 0) { ERR("PTRACE_SEIZE failed: %s", strerror(errno)); return -1; }
+    gattached = true;
+    if (ptrace(PTRACE_INTERRUPT, pid, 0, 0) < 0) return -1;
+    int status = 0;
+    const double deadline = monotime() + wait_timeout();
+    while ((ret = wait_stop(pid, status, deadline)) == 0) {
+        if ((status >> 16) == PTRACE_EVENT_STOP && WSTOPSIG(status) == SIGTRAP) break;
+        if (status >> 16) { ERR("unsupported attach stop"); ret = -1; break; }
+        if (WSTOPSIG(status) == SIGSTOP || WSTOPSIG(status) == SIGTSTP ||
+            WSTOPSIG(status) == SIGTTIN || WSTOPSIG(status) == SIGTTOU) {
+            preserve_stop_signal(pid, status); gremote_failed = true;
+            ERR("job-control signal during attach; preserving on detach"); ret = -1; break;
+        }
+        // A real signal can beat INTERRUPT; deliver in unmodified host context.
+        if (continue_target(pid, WSTOPSIG(status)) < 0 || ptrace(PTRACE_INTERRUPT, pid, 0, 0) < 0) { ret = -1; break; }
     }
-
-    ret = waitpid(pid, NULL, 0);
-    if (ret < 0) {
-        ERR("ptrace %d waitpid fail", pid);
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (ret < 0 || !target_single_thread(pid)) {
         return -1;
     }
 
@@ -3155,21 +2959,18 @@ int ini_hookso_env(int pid) {
     void *plibcaddr = 0;
     ret = find_libc_name(pid, libcname, plibcaddr);
     if (ret != 0) {
-        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
 
     glibcname = libcname;
     ret = find_call_trampoline(pid, libcname, plibcaddr, gpcalladdr);
     if (ret != 0) {
-        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
 
     uint64_t code = 0;
     ret = remote_process_read(pid, gpcalladdr, &code, sizeof(code));
     if (ret != 0) {
-        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
     gbackupcode = code;
@@ -3179,7 +2980,6 @@ int ini_hookso_env(int pid) {
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN,
                      -1, 0);
     if (ret != 0 || linux_syscall_failed(retval)) {
-        ptrace(PTRACE_DETACH, pid, 0, 0);
         return -1;
     }
     gpcallstack = (char *) retval;
@@ -3192,23 +2992,33 @@ int ini_hookso_env(int pid) {
 }
 
 int fini_hookso_env(int pid) {
-
-    for (const auto &kv: gallocmem) {
-        free_so_string_mem(pid, (void *) kv.first, kv.second, false);
+    int result = 0;
+    // After abort the callee may hold runtime locks. Do not reenter it merely
+    // to reclaim mappings: diagnose the leak instead of pretending rollback.
+    if (!gremote_failed && gstopped && !gcancel) {
+        for (const auto &kv: gallocmem)
+            if (free_so_string_mem(pid, (void *)kv.first, kv.second, false) < 0) { result = -1; break; }
+        uint64_t retval = 0;
+        if (!gremote_failed && gpcallstack &&
+            (syscall_so(pid, retval, syscall_sys_munmap, (uint64_t)gpcallstack, callstack_len) < 0 ||
+             linux_syscall_failed(retval))) result = -1;
+    } else if (gpcallstack || !gallocmem.empty()) {
+        ERR("aborted operation: temporary target mappings retained; callee side effects may remain"); result = -1;
     }
-    gallocmem.clear();
-
-    uint64_t retval = 0;
-    if (gpcallstack) {
-        syscall_so(pid, retval, syscall_sys_munmap, (uint64_t) gpcallstack, (uint64_t) callstack_len);
-        gpcallstack = 0;
+    gallocmem.clear(); gpcallstack = 0;
+    if (gattached) {
+        if (!gstopped) {
+            int status = 0;
+            if (ptrace(PTRACE_INTERRUPT, pid, 0, 0) == 0)
+                wait_stop(pid, status, monotime() + 2.0);
+        }
+        if (gdetach_signal && ptrace(PTRACE_SETSIGINFO, pid, 0, &gdetach_info) < 0) result = -1;
+        if (!gstopped || ptrace(PTRACE_DETACH, pid, 0, gdetach_signal) < 0) {
+            ERR("detach failed: %s", strerror(errno)); result = -1;
+        }
+        gattached = false;
     }
-
-    ptrace(PTRACE_DETACH, pid, 0, 0);
-
-    LOG("fini hookso env ok");
-
-    return 0;
+    return result;
 }
 
 int main(int argc, char **argv) {
@@ -3224,6 +3034,7 @@ int main(int argc, char **argv) {
 
     int ret = ini_hookso_env(pid);
     if (ret != 0) {
+        if (gattached) fini_hookso_env(pid);
         return -1;
     }
 
